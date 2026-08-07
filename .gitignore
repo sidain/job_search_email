@@ -1,0 +1,32 @@
+# Ignore environment variable files
+.env
+secrets/
+
+# Ignore temporary files and directories
+temp/
+
+# Ignore scanner output (contains personal job search data)
+csv_output/
+archives/
+
+# Ignore Python cache files
+__pycache__/
+
+# Ignore virtual environment directories
+venv/
+.venv/
+
+# Ignore log files
+*.log
+*.log.*
+*/*.log
+
+# Ignore compiled Python files
+*.pyc 
+*.pyo 
+
+# Ignore windows specific files
+Thumbs.db
+
+# Ignore macOS specific files
+.DS_Store
