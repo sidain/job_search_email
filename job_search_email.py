@@ -40,12 +40,15 @@ Usage
 import argparse
 import base64
 import csv
+import http.client as http_client
 import json
 import logging
 import os
 import random
 import re
 import shutil
+import socket
+import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -103,7 +106,7 @@ CSV_PATH = CSV_DIR / f"job_listings_{RUN_DATE}_{TIMESTAMP}.csv"
 
 # --- Local LLM (Ollama) config ---
 OLLAMA_HOST = 'http://localhost:11434'
-OLLAMA_MODEL = 'qwen2.5:7b-instruct'
+OLLAMA_MODEL = 'qwen2.5:14b-instruct'  # requires: ollama pull qwen2.5:14b-instruct (~9GB, fits comfortably in 20GB VRAM)
 OLLAMA_TEMPERATURE = 0.1
 
 # --- Enrichment (visiting each job URL) ---
@@ -177,7 +180,7 @@ def is_staffing_agency(company: str) -> bool:
 EXTRACTION_SYSTEM_PROMPT = """You extract individual job postings from a job-alert digest \
 email sent by a job board or job search platform.
 
-The email text below has links preserved inline in the form: link text <<https://url>>
+Links in the email have been replaced with short tokens in the form: link text <<L7>>
 
 Find every distinct job posting mentioned in the text. For each one, output a JSON object \
 with exactly these fields:
@@ -186,16 +189,17 @@ with exactly these fields:
 - "location": "Remote" if remote, otherwise "City, ST" (or country); "" if not stated
 - "comp": compensation/salary range if explicitly stated (e.g. "$90,000 - $110,000"), \
 otherwise ""
-- "url": the <<...>> link most closely associated with that specific job posting; "" if \
-none found nearby
+- "url": the token (just the id, e.g. "L7" -- NOT the surrounding << >>) from the link most \
+closely associated with that specific job posting; "" if none found nearby. Copy the token \
+exactly as it appears -- never invent one, never write out a real URL.
 
 Respond with ONLY a JSON array of these objects -- no markdown fences, no commentary. If no \
 distinct job postings are found in the text, respond with [].
 
 Example output:
 [{"title": "Senior Backend Engineer", "company": "Acme Corp", "location": "Remote", "comp": \
-"$120,000 - $150,000", "url": "https://example.com/job/1"}, {"title": "PHP Developer", \
-"company": "Beta LLC", "location": "Columbus, OH", "comp": "", "url": "https://example.com/job/2"}]
+"$120,000 - $150,000", "url": "L3"}, {"title": "PHP Developer", \
+"company": "Beta LLC", "location": "Columbus, OH", "comp": "", "url": "L5"}]
 """
 
 ENRICH_SYSTEM_PROMPT = """You are filling in missing details for a single job posting using \
@@ -206,6 +210,32 @@ Respond with ONLY a JSON object: {"location": "...", "comp": "..."}. Use "" for 
 the page text doesn't state it. If the current value already looks correct and the page \
 confirms it, repeat it back unchanged.
 """
+
+# JSON schemas passed to Ollama's `format` param -- grammar-constrains generation so the
+# model literally cannot emit syntactically invalid JSON, independent of prompt wording.
+JOB_ARRAY_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "company": {"type": "string"},
+            "location": {"type": "string"},
+            "comp": {"type": "string"},
+            "url": {"type": "string"},
+        },
+        "required": ["title", "company", "location", "comp", "url"],
+    },
+}
+
+ENRICH_OBJECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "location": {"type": "string"},
+        "comp": {"type": "string"},
+    },
+    "required": ["location", "comp"],
+}
 
 # ==================== LOGGING ====================
 
@@ -401,6 +431,14 @@ def create_resilient_session() -> requests.Session:
 
 # ==================== GMAIL HELPERS ====================
 
+# Raw socket/TLS-level drops (VPN blip, Windows killing an idle connection mid-request,
+# wifi hiccup) never raise HttpError -- they come straight from httplib2/ssl/socket and
+# were previously uncaught, crashing the whole run even when Google's API was never the
+# problem. Treat these as retryable too, same backoff as a retryable HttpError.
+NETWORK_RETRYABLE_EXCEPTIONS = (ConnectionError, TimeoutError, socket.error, ssl.SSLError,
+                                 http_client.HTTPException)
+
+
 def execute_with_backoff(request, logger, max_retries=5, what=""):
     for attempt in range(max_retries):
         try:
@@ -412,6 +450,14 @@ def execute_with_backoff(request, logger, max_retries=5, what=""):
                 raise
             wait = (2 ** attempt) + random.uniform(0, 1)
             logger.warning(f"{what or 'API call'} hit a retryable error (status {status}), backing off {wait:.1f}s")
+            time.sleep(wait)
+        except NETWORK_RETRYABLE_EXCEPTIONS as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(f"{what or 'API call'} hit a network-level error "
+                           f"({type(e).__name__}: {e}), retrying in {wait:.1f}s "
+                           f"(attempt {attempt + 1}/{max_retries})")
             time.sleep(wait)
 
 
@@ -437,7 +483,8 @@ def _is_retryable_http_error(exc):
 
 
 def batch_fetch_messages(gmail_service, message_briefs, logger, batch_size=20,
-                          inter_chunk_delay=0.5, max_retry_rounds=5):
+                          inter_chunk_delay=0.5, max_retry_rounds=5, msg_format='full',
+                          metadata_headers=None):
     fetched = {}
     pending = list(message_briefs)
 
@@ -457,8 +504,11 @@ def batch_fetch_messages(gmail_service, message_briefs, logger, batch_size=20,
             batch = gmail_service.new_batch_http_request()
             for msg_brief in chunk:
                 msg_id = msg_brief['id']
+                get_kwargs = {'userId': 'me', 'id': msg_id, 'format': msg_format}
+                if msg_format == 'metadata' and metadata_headers:
+                    get_kwargs['metadataHeaders'] = metadata_headers
                 batch.add(
-                    gmail_service.users().messages().get(userId='me', id=msg_id, format='full'),
+                    gmail_service.users().messages().get(**get_kwargs),
                     callback=make_callback(msg_id)
                 )
             execute_with_backoff(batch, logger, what=f"batch fetch round {round_num}")
@@ -555,20 +605,32 @@ def guess_platform_from_email(from_header, subject=""):
 
 
 def html_to_text_with_links(html_body):
-    """Converts an HTML email body into plain text, with every link inlined as
-    'link text <<https://url>>' right where it appeared, so the LLM can associate a URL
-    with the specific job posting it belongs to."""
+    """Converts an HTML email body into plain text, with every link replaced by a short
+    placeholder token like <<L7>> right where it appeared, plus a link_map from token -> real
+    URL. Job-alert emails (RemoteHunter, LinkedIn, etc.) commonly wrap links in enormous
+    base64-encoded tracking payloads (300-500+ chars). Asking a local LLM to reproduce one of
+    those verbatim is what triggers degenerate repetition loops -- it gets partway through
+    retyping the blob and gets stuck looping the same fragment until it hits the token cap.
+    Short placeholders sidestep that entirely: the model only ever has to copy back "L7"."""
     soup = BeautifulSoup(html_body, "html.parser")
     for tag in soup(["script", "style"]):
         tag.decompose()
+
+    link_map = {}
+    counter = [0]
+
     for a in soup.find_all('a', href=True):
         href = a['href'].strip()
         text = a.get_text(strip=True)
         if href.startswith('http://') or href.startswith('https://'):
-            a.replace_with(f"{text} <<{href}>>")
+            counter[0] += 1
+            token = f"L{counter[0]}"
+            link_map[token] = href
+            a.replace_with(f"{text} <<{token}>>")
+
     raw_text = soup.get_text(separator="\n")
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-    return "\n".join(lines)
+    return "\n".join(lines), link_map
 
 
 # ==================== OLLAMA / EXTRACTION ====================
@@ -610,7 +672,11 @@ def _attempt_repair_truncated_array(text):
         return None
 
 
-def call_ollama(client, system_prompt, user_prompt, logger, note="", extra_options=None):
+def call_ollama(client, system_prompt, user_prompt, logger, note="", extra_options=None, schema=None):
+    """schema, when given, is a JSON-schema dict passed straight through to Ollama's `format`
+    parameter. Since Ollama 0.5 this grammar-constrains token generation so the model is
+    structurally unable to emit invalid JSON -- a much stronger guarantee than prompting
+    alone, and it works regardless of which model is loaded."""
     options = {"temperature": OLLAMA_TEMPERATURE, "num_predict": 4096, "num_ctx": 8192}
     if extra_options:
         options.update(extra_options)
@@ -619,6 +685,7 @@ def call_ollama(client, system_prompt, user_prompt, logger, note="", extra_optio
             model=OLLAMA_MODEL,
             prompt=f"{system_prompt}\n\n{user_prompt}",
             options=options,
+            format=schema if schema is not None else "",
             stream=False,
         )
         return resp.get('response', '')
@@ -644,37 +711,75 @@ def chunk_text(text, max_chars=6000):
     return chunks
 
 
-def extract_jobs_from_email(client, email_text, logger):
+FAILED_CHUNKS_DIR = LOGS_DIR / 'failed_chunks'
+
+
+def _dump_failed_chunk(email_label, chunk_index, total_chunks, chunk_text_in, raw_first, raw_retry, logger):
+    """Writes everything needed to debug a chunk that never parsed: the input text sent to
+    the model, and both raw responses (first attempt + retry). Saved separately from the
+    main log so failures are easy to find and inspect without wading through debug output."""
+    try:
+        FAILED_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_label = re.sub(r'[^\w\-]+', '_', email_label)[:60]
+        out_path = FAILED_CHUNKS_DIR / f"{TIMESTAMP}_{safe_label}_chunk{chunk_index}of{total_chunks}.txt"
+        content = (
+            f"Email: {email_label}\n"
+            f"Chunk: {chunk_index}/{total_chunks}\n"
+            f"Chunk input length: {len(chunk_text_in)} chars\n"
+            f"{'=' * 60}\nCHUNK INPUT TEXT:\n{'=' * 60}\n{chunk_text_in}\n\n"
+            f"{'=' * 60}\nRAW RESPONSE (1st attempt, {len(raw_first)} chars):\n{'=' * 60}\n{raw_first}\n\n"
+            f"{'=' * 60}\nRAW RESPONSE (retry, {len(raw_retry)} chars):\n{'=' * 60}\n{raw_retry}\n"
+        )
+        out_path.write_text(content, encoding='utf-8')
+        return out_path
+    except Exception as e:
+        logger.error(f"Could not write failed-chunk diagnostic file: {e}")
+        return None
+
+
+def extract_jobs_from_email(client, email_text, logger, link_map=None, email_label="unknown email"):
+    link_map = link_map or {}
     jobs = []
     chunks = chunk_text(email_text)
     for i, chunk in enumerate(chunks):
-        note = f"(extraction chunk {i + 1}/{len(chunks)})"
-        raw = call_ollama(client, EXTRACTION_SYSTEM_PROMPT, chunk, logger, note=note)
+        note = f"(extraction chunk {i + 1}/{len(chunks)}, '{email_label}')"
+        raw = call_ollama(client, EXTRACTION_SYSTEM_PROMPT, chunk, logger, note=note, schema=JOB_ARRAY_SCHEMA)
         parsed = safe_json_parse(raw)
+        raw_retry = ""
 
         if not isinstance(parsed, list):
             # One retry with a blunter reminder -- covers the common case where the model
             # added stray commentary before/after the JSON, or got cut off mid-array.
-            logger.debug(f"Chunk {i + 1}/{len(chunks)} didn't parse; raw response started with: "
-                         f"{raw[:200]!r}")
+            logger.debug(f"Chunk {i + 1}/{len(chunks)} of '{email_label}' didn't parse "
+                         f"({len(raw)} chars back); raw response started with: {raw[:200]!r}")
             retry_prompt = chunk + "\n\nReminder: respond with ONLY the JSON array. No other text."
             raw_retry = call_ollama(client, EXTRACTION_SYSTEM_PROMPT, retry_prompt, logger,
-                                     note=f"{note} retry")
+                                     note=f"{note} retry", schema=JOB_ARRAY_SCHEMA)
             parsed = safe_json_parse(raw_retry)
 
         if isinstance(parsed, list):
             for item in parsed:
                 if isinstance(item, dict) and str(item.get('title', '')).strip():
+                    token = str(item.get('url', '')).strip().strip('<>').strip()
+                    resolved_url = link_map.get(token, "")
+                    if token and not resolved_url:
+                        logger.debug(f"'{email_label}': model returned link token '{token}' "
+                                     f"with no match in link_map (chunk {i + 1}/{len(chunks)}).")
                     jobs.append({
                         'title': str(item.get('title', '')).strip(),
                         'company': str(item.get('company', '')).strip() or "Needs Review",
                         'location': str(item.get('location', '')).strip(),
                         'comp': str(item.get('comp', '')).strip(),
-                        'url': str(item.get('url', '')).strip(),
+                        'url': resolved_url,
                     })
         else:
-            logger.warning(f"Could not parse job JSON from chunk {i + 1}/{len(chunks)} "
-                            f"even after retry -- skipping it.")
+            dump_path = _dump_failed_chunk(email_label, i + 1, len(chunks), chunk, raw, raw_retry, logger)
+            reason = "empty response from Ollama" if not raw and not raw_retry else "response wasn't valid/repairable JSON"
+            logger.warning(
+                f"Could not parse job JSON from chunk {i + 1}/{len(chunks)} of '{email_label}' "
+                f"even after retry ({reason}, 1st={len(raw)} chars, retry={len(raw_retry)} chars) "
+                f"-- skipping it. Details: {dump_path or '(failed to write diagnostic file)'}"
+            )
 
     seen, unique = set(), []
     for j in jobs:
@@ -728,7 +833,7 @@ def stage2_llm_fill(job, client, logger):
             f"Page text:\n{page_text}"
         )
         raw = call_ollama(client, ENRICH_SYSTEM_PROMPT, user_prompt, logger,
-                           note=f"(enrich '{job.get('title', '')[:40]}')")
+                           note=f"(enrich '{job.get('title', '')[:40]}')", schema=ENRICH_OBJECT_SCHEMA)
         parsed = safe_json_parse(raw)
         if isinstance(parsed, dict):
             new_loc = str(parsed.get('location', '')).strip()
@@ -849,17 +954,83 @@ def write_run_csv(rows, logger):
         logger.error(f"Failed to write run CSV: {e}")
 
 
+PROCESSED_EXPORT_HEADERS = ["Date", "Subject", "Platform", "MessageID", "GmailLink"]
+
+
+def export_processed_emails_csv(gmail_service, logger):
+    """One-off report: every email currently carrying the '_ _ JOB SEARCH/IC' label (i.e.
+    everything the scanner has ever marked processed), written to a local CSV. Doesn't touch
+    Sheets or change any labels -- purely a local snapshot for review."""
+    logger.info(f"Listing all emails labeled '{PROCESSED_LABEL}' (all-time, no date cutoff)...")
+    briefs = list_all_messages(gmail_service, f'label:"{PROCESSED_LABEL}"', logger)
+    if not briefs:
+        logger.info("No processed emails found yet -- nothing to export.")
+        return
+
+    logger.info(f"Found {len(briefs)} processed email(s); fetching headers...")
+    # metadata format + a specific header list keeps this fast -- no bodies, no MIME walk.
+    fetched = batch_fetch_messages(gmail_service, briefs, logger, msg_format='metadata',
+                                    metadata_headers=['Date', 'Subject', 'From'])
+
+    rows = []
+    for brief in briefs:
+        msg_id = brief['id']
+        msg = fetched.get(msg_id)
+        if msg is None:
+            logger.warning(f"Skipping {msg_id} in export -- metadata fetch failed for it.")
+            continue
+        headers = msg.get('payload', {}).get('headers', [])
+        date = parse_email_date(next((h['value'] for h in headers if h['name'].lower() == 'date'), ''))
+        subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
+        from_header = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+        platform = guess_platform_from_email(from_header, subject)
+        rows.append([date, subject, platform, msg_id, build_gmail_link(msg_id)])
+
+    CSV_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = CSV_DIR / f"processed_emails_{RUN_DATE}_{TIMESTAMP}.csv"
+    try:
+        with open(out_path, mode='w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(PROCESSED_EXPORT_HEADERS)
+            writer.writerows(rows)
+        logger.info(f"Wrote {len(rows)} processed email(s) to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write processed-emails export: {e}")
+
+
+SHEET_APPEND_BATCH_SIZE = 200  # rows per append call -- smaller requests are less exposed to
+                                # a dropped connection mid-transfer, and a failure partway
+                                # through only costs the current batch, not everything
+
+
 def flush_sheet_writes(sheets_service, rows_to_append, logger):
+    """Writes in batches rather than one giant append. If a batch fails even after retries,
+    logs exactly which rows didn't make it (with their index range) and re-raises -- the
+    caller already has everything in the local CSV as a fallback, so nothing is lost, but the
+    person running it needs to know which rows still need a manual push to Sheets."""
     if not rows_to_append:
         return
-    request = sheets_service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=RANGE_NAME,
-        valueInputOption='USER_ENTERED',
-        body={'values': rows_to_append}
-    )
-    execute_with_backoff(request, logger, what="sheets append")
-    logger.info(f"Appended {len(rows_to_append)} new row(s) to '{SHEET_NAME}'.")
+
+    total = len(rows_to_append)
+    written = 0
+    for start in range(0, total, SHEET_APPEND_BATCH_SIZE):
+        batch = rows_to_append[start:start + SHEET_APPEND_BATCH_SIZE]
+        request = sheets_service.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range=RANGE_NAME,
+            valueInputOption='USER_ENTERED',
+            body={'values': batch}
+        )
+        try:
+            execute_with_backoff(request, logger, what=f"sheets append (rows {start + 1}-{start + len(batch)}/{total})")
+            written += len(batch)
+        except Exception as e:
+            logger.error(f"Sheets append failed for rows {start + 1}-{start + len(batch)} of {total} "
+                        f"even after retries ({e}). {written} row(s) made it to the sheet before this; "
+                        f"the rest are safe in the local run CSV and can be pasted in manually if needed.")
+            raise
+
+    logger.info(f"Appended {written} new row(s) to '{SHEET_NAME}'.")
 
 
 # ==================== PER-EMAIL WORKER (for multitasked extraction) ====================
@@ -883,14 +1054,16 @@ def process_one_email(brief, fetched, logger):
 
     html_body = extract_html_body(msg['payload'])
     if html_body:
-        text_with_links = html_to_text_with_links(html_body)
+        text_with_links, link_map = html_to_text_with_links(html_body)
     else:
         text_with_links = extract_plain_body(msg['payload']) or msg.get('snippet', '')
+        link_map = {}
         logger.warning(f"Email {msg_id} ('{subject}') has no HTML part -- job links won't be captured.")
 
     logger.info(f"--- Processing '{subject}' from {platform} ({msg_id}) ---")
     client = ollama.Client(host=OLLAMA_HOST)
-    jobs = extract_jobs_from_email(client, text_with_links, logger)
+    email_label = f"{subject[:80]} ({msg_id})"
+    jobs = extract_jobs_from_email(client, text_with_links, logger, link_map=link_map, email_label=email_label)
     logger.info(f"  Extracted {len(jobs)} job posting(s) from '{subject}'.")
 
     for j in jobs:
@@ -904,11 +1077,19 @@ def process_one_email(brief, fetched, logger):
 
 # ==================== MAIN ====================
 
-def main(dry_run=False, no_enrich=False):
+def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed=False):
     start_time = time.time()
     archive_old_logs()
     logger = setup_logging()
-    logger.info(f"Job listings scanner starting... (dry_run={dry_run}, no_enrich={no_enrich})")
+
+    if export_processed:
+        logger.info("Job listings scanner starting... (--export-processed-emails)")
+        gmail_service, _ = get_google_services(logger)
+        export_processed_emails_csv(gmail_service, logger)
+        return
+
+    logger.info(f"Job listings scanner starting... "
+                f"(dry_run={dry_run}, no_enrich={no_enrich}, reprocess_recent={reprocess_recent})")
 
     stats = {'emails_scanned': 0, 'jobs_extracted': 0, 'rows_appended': 0,
               'rows_updated': 0, 'urls_enriched': 0, 'enrich_failures': 0}
@@ -919,16 +1100,27 @@ def main(dry_run=False, no_enrich=False):
     searches_label_id = get_or_create_label_id(gmail_service, SEARCHES_LABEL, logger)
     existing_rows = get_existing_sheet_data(sheets_service, logger)
 
-    cutoff_date = (datetime.now() - timedelta(days=TWO_WEEKS_DAYS)).strftime('%Y/%m/%d')
-    query = f'label:"{SEARCHES_LABEL}" -label:"{PROCESSED_LABEL}" after:{cutoff_date}'
+    if reprocess_recent:
+        # Normal runs remove SEARCHES_LABEL once an email is processed, so the usual
+        # `label:SEARCHES -label:IC` query can't find already-processed emails anymore.
+        # Match on IC instead (still present) so we can re-run extraction against them.
+        cutoff_date = (datetime.now() - timedelta(days=reprocess_recent)).strftime('%Y/%m/%d')
+        query = f'label:"{PROCESSED_LABEL}" after:{cutoff_date}'
+        logger.info(f"--reprocess-recent {reprocess_recent}: re-scanning already-processed "
+                    f"emails from the last {reprocess_recent} day(s), ignoring the IC filter.")
+    else:
+        cutoff_date = (datetime.now() - timedelta(days=TWO_WEEKS_DAYS)).strftime('%Y/%m/%d')
+        query = f'label:"{SEARCHES_LABEL}" -label:"{PROCESSED_LABEL}" after:{cutoff_date}'
+
     briefs = list_all_messages(gmail_service, query, logger)
 
     if not briefs:
-        logger.info(f"No new job-alert digest emails found in the last {TWO_WEEKS_DAYS} days.")
+        window_desc = f"the last {reprocess_recent} day(s)" if reprocess_recent else f"the last {TWO_WEEKS_DAYS} days"
+        logger.info(f"No {'processed' if reprocess_recent else 'new'} job-alert digest emails found in {window_desc}.")
         write_summary_log(stats)
         return
 
-    logger.info(f"Found {len(briefs)} new digest email(s) to process "
+    logger.info(f"Found {len(briefs)} digest email(s) to {'re-' if reprocess_recent else ''}process "
                 f"(newer than {cutoff_date}).")
     if len(briefs) > 50:
         est_secs = len(briefs) * 25  # rough: ~15-40s/email seen in practice, varies with digest size
@@ -965,6 +1157,7 @@ def main(dry_run=False, no_enrich=False):
                 last_progress_log = now
 
     stats['jobs_extracted'] = len(all_jobs)
+    sheet_write_failed = False
 
     if not all_jobs:
         logger.info("No individual job postings were extracted from any email.")
@@ -1000,20 +1193,40 @@ def main(dry_run=False, no_enrich=False):
                 agency_tag = " [AGENCY]" if row[11] == "Yes" else ""
                 print(f"  [{row[10]}]{agency_tag} {row[2]} -- {row[1]} ({row[3]}, {row[4] or 'comp n/a'}) [{row[5]}] {row[6]}")
         else:
-            flush_sheet_writes(sheets_service, rows_to_append, logger)
+            try:
+                flush_sheet_writes(sheets_service, rows_to_append, logger)
+            except Exception as e:
+                # Already logged in detail inside flush_sheet_writes (which rows made it,
+                # which didn't). Don't let a Sheets outage crash the whole run and don't mark
+                # these emails as processed -- next run will safely re-extract and retry them.
+                # The CSV above already has everything regardless.
+                sheet_write_failed = True
+                logger.error(f"Continuing without marking this run's emails as processed, "
+                            f"since the Sheets write didn't fully succeed ({type(e).__name__}). "
+                            f"Re-run normally and they'll be picked up again.")
 
-    if processed_ids and not dry_run:
-        request = gmail_service.users().messages().batchModify(
-            userId='me',
-            body={'ids': processed_ids, 'addLabelIds': [processed_label_id],
-                  'removeLabelIds': [searches_label_id]}
-        )
-        execute_with_backoff(request, logger, what="gmail batchModify")
-        logger.info(f"Marked {len(processed_ids)} email(s) as processed "
-                    f"(added IC, removed '{SEARCHES_LABEL}').")
+    if processed_ids and not dry_run and not sheet_write_failed:
+        try:
+            request = gmail_service.users().messages().batchModify(
+                userId='me',
+                body={'ids': processed_ids, 'addLabelIds': [processed_label_id],
+                      'removeLabelIds': [searches_label_id]}
+            )
+            execute_with_backoff(request, logger, what="gmail batchModify")
+            logger.info(f"Marked {len(processed_ids)} email(s) as processed "
+                        f"(added IC, removed '{SEARCHES_LABEL}').")
+        except Exception as e:
+            # Sheets already has the data at this point -- worst case here is just that
+            # these emails get harmlessly re-extracted next run instead of skipped.
+            logger.error(f"Couldn't mark emails as processed after Sheets write succeeded "
+                        f"({type(e).__name__}: {e}). Not fatal -- they'll just get "
+                        f"re-scanned (and safely de-duped) next run.")
     elif processed_ids and dry_run:
         logger.info(f"--dry-run: would have marked {len(processed_ids)} email(s) as processed "
                     f"(IC added, '{SEARCHES_LABEL}' removed).")
+    elif processed_ids and sheet_write_failed:
+        logger.info(f"Not marking {len(processed_ids)} email(s) as processed -- Sheets write "
+                    f"didn't fully succeed this run, so they're left for next time.")
 
     stats['duration_secs'] = time.time() - start_time
     write_summary_log(stats)
@@ -1027,10 +1240,17 @@ if __name__ == '__main__':
                          help="Extract and enrich, print/write CSV for review, but don't touch Gmail labels or Sheets.")
     parser.add_argument('--no-enrich', action='store_true',
                          help="Skip visiting job URLs -- faster, useful for testing the extraction prompt alone.")
+    parser.add_argument('--reprocess-recent', type=int, default=None, metavar='N',
+                         help="One-time cleanup pass: re-scan emails already marked IC from the last N days "
+                              "(e.g. after a bug fix). Ignores the normal 'already processed' skip.")
+    parser.add_argument('--export-processed-emails', action='store_true',
+                         help="Write a local CSV listing every email ever marked processed (IC label), "
+                              "all-time. Doesn't touch Sheets/Gmail labels -- just a local report, then exits.")
     args = parser.parse_args()
 
     try:
-        main(dry_run=args.dry_run, no_enrich=args.no_enrich)
+        main(dry_run=args.dry_run, no_enrich=args.no_enrich,
+             reprocess_recent=args.reprocess_recent, export_processed=args.export_processed_emails)
     except Exception as e:
         try:
             logging.getLogger("JobListingsScanner").exception(f"CRITICAL ERROR: {e}")
