@@ -49,10 +49,12 @@ import re
 import shutil
 import socket
 import ssl
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import ollama
 import requests
@@ -80,9 +82,9 @@ TWO_WEEKS_DAYS = 14   # only emails newer than this are considered
 # Same spreadsheet as job_search_email.py, new tab just for scanned listings.
 SPREADSHEET_ID = '1EUFfZjv1Pb_3hueE15fJ7Eccze79gM4hOcK-0lQ0umk'
 SHEET_NAME = 'Job Listings'
-RANGE_NAME = f'{SHEET_NAME}!A:L'
+RANGE_NAME = f'{SHEET_NAME}!A:M'
 # Columns: Date, Title, Company, Location, Comp, Platform, URL, MessageID, GmailLink, Notes,
-#          Status, StaffingAgency
+#          Status, StaffingAgency, USEligible
 
 TOKEN_PATH = 'secrets/token.json'          # fallback if not using .env token storage
 CREDENTIALS_PATH = 'secrets/credentials.json'
@@ -91,10 +93,12 @@ ENV_FILE = Path('./.env')
 LOGS_DIR = Path('./logs')
 ARCHIVES_DIR = Path('./archives')
 CSV_DIR = Path('./csv_output')
+DATA_DIR = Path('./data')
 LOGS_ARCHIVE_DIR = ARCHIVES_DIR / 'logs'
+PLATFORM_STATS_PATH = DATA_DIR / 'platform_stats.json'  # persists across runs
 
 CSV_HEADERS = ["Date", "Title", "Company", "Location", "Comp", "Platform",
-               "URL", "MessageID", "GmailLink", "Notes", "Status", "StaffingAgency"]
+               "URL", "MessageID", "GmailLink", "Notes", "Status", "StaffingAgency", "USEligible"]
 
 TIMESTAMP = datetime.now().strftime("%Y%m%d%H%M%S")
 RUN_DATE = datetime.now().strftime("%Y-%m-%d")
@@ -175,6 +179,72 @@ STAFFING_AGENCY_KEYWORDS = [
 def is_staffing_agency(company: str) -> bool:
     clean = (company or "").strip().lower()
     return any(keyword in clean for keyword in STAFFING_AGENCY_KEYWORDS)
+
+
+# US 2-letter state/territory codes -- used to confirm a "City, XX" location is genuinely
+# US-based rather than, say, "City, ON" (Ontario) getting missed.
+US_STATE_CODES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA",
+    "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT",
+    "VA", "WA", "WV", "WI", "WY", "DC", "PR",
+}
+
+# Best-effort, not authoritative -- country/region names and city names that show up often
+# enough in these digests to be worth flagging. False negatives (a non-US location that
+# isn't caught) are expected; the goal is catching the obvious cases so they don't need to
+# be individually clicked through, not a legal work-authorization determination.
+NON_US_LOCATION_KEYWORDS = [
+    'united kingdom', ' uk', 'u.k.', 'england', 'scotland', 'wales', 'london', 'canada',
+    'ontario', 'toronto', 'vancouver', 'montreal', 'germany', 'berlin', 'munich', 'france',
+    'paris', 'india', 'bangalore', 'bengaluru', 'hyderabad', 'mumbai', 'pune', 'delhi',
+    'brazil', 'brasil', 'são paulo', 'sao paulo', 'mexico', 'méxico', 'poland', 'warsaw',
+    'spain', 'madrid', 'barcelona', 'italy', 'milan', 'rome', 'netherlands', 'amsterdam',
+    'ireland', 'dublin', 'australia', 'sydney', 'melbourne', 'singapore', 'philippines',
+    'manila', 'ukraine', 'kyiv', 'romania', 'bucharest', 'portugal', 'lisbon', 'argentina',
+    'buenos aires', 'colombia', 'bogota', 'bogotá', 'japan', 'tokyo', 'china', 'shanghai',
+    'beijing', 'vietnam', 'hanoi', 'pakistan', 'nigeria', 'lagos', 'south africa', 'israel',
+    'tel aviv', 'uae', 'dubai', 'egypt', 'cairo', 'turkey', 'istanbul', 'sweden',
+    'stockholm', 'norway', 'oslo', 'denmark', 'copenhagen', 'finland', 'helsinki',
+    'switzerland', 'zurich', 'austria', 'vienna', 'belgium', 'brussels', 'greece', 'athens',
+    'czech republic', 'prague', 'hungary', 'budapest', 'new zealand', 'auckland',
+    'indonesia', 'jakarta', 'malaysia', 'kuala lumpur', 'thailand', 'bangkok', 'south korea',
+    'seoul', 'costa rica', 'chile', 'santiago', 'peru', 'lima',
+]
+
+NON_USD_CURRENCY_SIGNALS = ['£', '€', '₹', '¥', 'r$', 'c$', 'a$', 'gbp', 'eur', 'cad', 'aud', 'inr']
+
+
+def classify_us_eligibility(location: str, comp: str):
+    """Heuristic, not authoritative -- flags the obvious cases (an explicit non-US country in
+    the location, or comp quoted in a non-USD currency) so they're easy to filter out or
+    double-check, rather than a real work-authorization determination. Returns
+    (eligibility, reason) where eligibility is 'Yes' / 'No' / 'Unclear'."""
+    loc = (location or "").strip()
+    loc_lower = loc.lower()
+    comp_lower = (comp or "").strip().lower()
+
+    # Comp currency is a stronger signal than location text when both are present -- a
+    # company can list a US office location on a role that's actually paid/based elsewhere.
+    for signal in NON_USD_CURRENCY_SIGNALS:
+        if signal in comp_lower:
+            return 'No', f"comp quoted in non-USD currency ('{signal}')"
+
+    if re.search(r'\b(us|usa|united states)\b', loc_lower):
+        return 'Yes', ''
+
+    for keyword in NON_US_LOCATION_KEYWORDS:
+        if keyword in loc_lower:
+            return 'No', f"location mentions '{keyword.strip()}'"
+
+    state_match = re.search(r',\s*([A-Za-z]{2})\b', loc)
+    if state_match and state_match.group(1).upper() in US_STATE_CODES:
+        return 'Yes', ''
+
+    if loc_lower in ('remote', ''):
+        return 'Unclear', 'remote with no country specified'
+
+    return 'Unclear', ''
 
 
 EXTRACTION_SYSTEM_PROMPT = """You extract individual job postings from a job-alert digest \
@@ -592,6 +662,12 @@ def extract_plain_body(payload):
 
 
 def guess_platform_from_email(from_header, subject=""):
+    """Recognized boards get their canonical name from PLATFORM_DOMAINS. Everything else
+    used to collapse into a useless 'Unknown' bucket -- which hides exactly the pattern
+    worth noticing (a specific low-value source you keep getting mail from and never any
+    real leads from). Instead, fall back to the sender's display name (e.g. "RemoteHunter
+    Job Alerts" -> "RemoteHunter"), which is what actually shows up in the platform-yield
+    report and lets a chronically-empty source get identified by name."""
     match = re.search(r'@([\w.-]+)', from_header or "")
     domain = match.group(1).lower() if match else ""
     for known_domain, name in PLATFORM_DOMAINS.items():
@@ -601,7 +677,17 @@ def guess_platform_from_email(from_header, subject=""):
     for known_domain, name in PLATFORM_DOMAINS.items():
         if name.lower() in (subject or "").lower():
             return name
-    return "Unknown"
+
+    display_match = re.match(r'^\s*"?([^"<]+?)"?\s*<', from_header or "")
+    if display_match:
+        display_name = display_match.group(1).strip()
+        # strip generic boilerplate suffixes so "FlexBoard Job Alerts" -> "FlexBoard"
+        display_name = re.sub(r'\s*[-|:]?\s*(job\s*alerts?|notifications?|alerts?|digest|jobs?)\s*$',
+                               '', display_name, flags=re.IGNORECASE).strip()
+        if display_name:
+            return display_name
+
+    return domain if domain else "Unknown"
 
 
 def html_to_text_with_links(html_body):
@@ -793,6 +879,43 @@ def extract_jobs_from_email(client, email_text, logger, link_map=None, email_lab
 
 # ==================== ENRICHMENT (visiting each job URL) ====================
 
+# Per-domain throttle: FETCH_WORKERS threads with no coordination can all land on the same
+# domain at once, which is what trips rate limiting (seen heavily on linkedin.com and
+# google.com) even when the fetch would otherwise succeed. This enforces a minimum spacing
+# between requests to the *same* domain across all threads, without slowing down requests to
+# different domains at all.
+DOMAIN_MIN_INTERVAL_SECS = 2.0
+_domain_last_request = {}
+_domain_lock = threading.Lock()
+
+# Domains observed to hard-block scraping outright (bot/fingerprint detection returning a
+# flat HTTP 403 on essentially every attempt) rather than rate-limit it. Pacing requests to
+# these doesn't improve the odds -- it just spends real time (2s/request * hundreds of jobs)
+# waiting on a result that was never going to succeed. Skip the throttle for these specifically
+# and let the request fail fast instead. linkedin.com/google.com are deliberately NOT here --
+# those returned 429 (rate limiting), which pacing genuinely helps with.
+NO_THROTTLE_DOMAINS = {'glassdoor.com', 'ziprecruiter.com', 'monster.com'}
+
+
+def _throttle_domain(url, logger):
+    domain = urlparse(url).netloc.lower()
+    if not domain:
+        return
+    if any(known in domain for known in NO_THROTTLE_DOMAINS):
+        logger.debug(f"Skipping throttle for {domain} -- known hard-block, pacing won't change the outcome.")
+        return
+    with _domain_lock:
+        now = time.time()
+        last = _domain_last_request.get(domain, 0)
+        wait = DOMAIN_MIN_INTERVAL_SECS - (now - last)
+        # Reserve the next slot up front (even before sleeping) so two threads that arrive
+        # together don't both compute the same "last" and both proceed immediately.
+        _domain_last_request[domain] = (last + DOMAIN_MIN_INTERVAL_SECS) if wait > 0 else now
+    if wait > 0:
+        logger.debug(f"Throttling {domain}: waiting {wait:.1f}s (min {DOMAIN_MIN_INTERVAL_SECS}s between requests)")
+        time.sleep(wait)
+
+
 def stage1_resolve_and_fetch(job, session, logger):
     """Resolves tracking-redirect URLs to their final destination and grabs page text.
     Runs in the network-bound FETCH_WORKERS thread pool."""
@@ -802,6 +925,7 @@ def stage1_resolve_and_fetch(job, session, logger):
         job['notes'] = "No URL to enrich"
         return job
     try:
+        _throttle_domain(url, logger)
         resp = session.get(url, headers=DEFAULT_HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
         job['url'] = resp.url  # unwrap the tracking redirect
         if resp.status_code >= 400:
@@ -954,6 +1078,69 @@ def write_run_csv(rows, logger):
         logger.error(f"Failed to write run CSV: {e}")
 
 
+# ==================== PLATFORM YIELD TRACKING (cross-run) ====================
+# Tracks emails-seen and jobs-extracted per source across every run, persisted to a small
+# JSON file. A single run's sample isn't enough to call a source dead -- 12 emails from
+# FlexBoard yielding 0 jobs in one run could be noise, but the same pattern holding after
+# 40 emails over a month is a real signal worth acting on (unsubscribe, mute the filter).
+
+def load_platform_stats():
+    if not PLATFORM_STATS_PATH.exists():
+        return {}
+    try:
+        return json.loads(PLATFORM_STATS_PATH.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def save_platform_stats(stats, logger):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        PLATFORM_STATS_PATH.write_text(json.dumps(stats, indent=2, sort_keys=True), encoding='utf-8')
+    except Exception as e:
+        logger.error(f"Failed to save platform stats to {PLATFORM_STATS_PATH}: {e}")
+
+
+def update_platform_stats(run_counts, logger):
+    """run_counts: {platform: {'emails': n, 'jobs': n}} for this run only. Merges into the
+    persisted totals and returns the merged dict."""
+    stats = load_platform_stats()
+    for platform, counts in run_counts.items():
+        entry = stats.setdefault(platform, {'emails': 0, 'jobs': 0})
+        entry['emails'] += counts.get('emails', 0)
+        entry['jobs'] += counts.get('jobs', 0)
+    save_platform_stats(stats, logger)
+    return stats
+
+
+def print_platform_report(stats, min_emails=3):
+    """Sorted worst-yield-first so the sources actually worth dropping surface at the top.
+    min_emails filters out sources with too small a sample to mean anything yet."""
+    if not stats:
+        print("No platform stats recorded yet -- run the scanner normally first.")
+        return
+    rows = []
+    for platform, counts in stats.items():
+        emails = counts.get('emails', 0)
+        jobs = counts.get('jobs', 0)
+        yield_rate = (jobs / emails) if emails else 0
+        rows.append((platform, emails, jobs, yield_rate))
+    rows.sort(key=lambda r: (r[3], -r[1]))  # worst yield first, then most emails (most data)
+
+    print(f"\n{'Platform':<28} {'Emails':>8} {'Jobs':>8} {'Jobs/Email':>12}")
+    print("-" * 60)
+    for platform, emails, jobs, rate in rows:
+        flag = "  <-- consider dropping" if emails >= min_emails and rate == 0 else ""
+        print(f"{platform:<28} {emails:>8} {jobs:>8} {rate:>12.2f}{flag}")
+    zero_yield = [r for r in rows if r[1] >= min_emails and r[3] == 0]
+    if zero_yield:
+        print(f"\n{len(zero_yield)} source(s) with {min_emails}+ emails and zero jobs extracted, ever:")
+        for platform, emails, _, _ in zero_yield:
+            print(f"  - {platform} ({emails} emails, 0 leads)")
+    else:
+        print("\nNo source has hit zero yield with a meaningful sample size yet.")
+
+
 PROCESSED_EXPORT_HEADERS = ["Date", "Subject", "Platform", "MessageID", "GmailLink"]
 
 
@@ -998,28 +1185,70 @@ def export_processed_emails_csv(gmail_service, logger):
         logger.error(f"Failed to write processed-emails export: {e}")
 
 
+GMAIL_BATCH_MODIFY_MAX_IDS = 1000  # Gmail API hard limit per batchModify call
+
+
+def archive_existing_processed(gmail_service, logger):
+    """One-off cleanup pass: finds every '_ _ JOB SEARCH/IC'-labeled email still sitting in
+    the inbox (from before archive/mark-read was added to the normal end-of-run labeling) and
+    removes INBOX/UNREAD from them. No extraction, no Sheets writes -- just label cleanup."""
+    query = f'label:"{PROCESSED_LABEL}" label:"INBOX"'
+    logger.info(f"Finding already-processed emails still sitting in the inbox: {query}")
+    briefs = list_all_messages(gmail_service, query, logger)
+
+    if not briefs:
+        logger.info("Nothing to archive -- no IC-labeled emails are currently in the inbox.")
+        print("Nothing to archive -- no IC-labeled emails are currently in the inbox.")
+        return
+
+    logger.info(f"Found {len(briefs)} already-processed email(s) still in the inbox. Archiving + marking read...")
+    ids = [b['id'] for b in briefs]
+    archived = 0
+    for start in range(0, len(ids), GMAIL_BATCH_MODIFY_MAX_IDS):
+        chunk = ids[start:start + GMAIL_BATCH_MODIFY_MAX_IDS]
+        request = gmail_service.users().messages().batchModify(
+            userId='me', body={'ids': chunk, 'removeLabelIds': ['INBOX', 'UNREAD']}
+        )
+        try:
+            execute_with_backoff(request, logger, what=f"archive batch ({start + 1}-{start + len(chunk)}/{len(ids)})")
+            archived += len(chunk)
+        except Exception as e:
+            logger.error(f"Archive batch {start + 1}-{start + len(chunk)} failed even after retries "
+                        f"({type(e).__name__}: {e}). {archived} email(s) archived so far; "
+                        f"re-run --archive-existing-processed to pick up the rest.")
+            break
+
+    logger.info(f"Archived + marked read: {archived}/{len(ids)} email(s).")
+    print(f"Archived + marked read: {archived}/{len(ids)} email(s).")
+
+
 SHEET_APPEND_BATCH_SIZE = 200  # rows per append call -- smaller requests are less exposed to
                                 # a dropped connection mid-transfer, and a failure partway
                                 # through only costs the current batch, not everything
 
 
-def flush_sheet_writes(sheets_service, rows_to_append, logger):
+def flush_sheet_writes(sheets_service, rows_to_append, logger, add_separator=False):
     """Writes in batches rather than one giant append. If a batch fails even after retries,
     logs exactly which rows didn't make it (with their index range) and re-raises -- the
     caller already has everything in the local CSV as a fallback, so nothing is lost, but the
-    person running it needs to know which rows still need a manual push to Sheets."""
+    person running it needs to know which rows still need a manual push to Sheets.
+
+    add_separator=True prepends one blank row before this run's data, so consecutive runs are
+    visually broken up in the sheet. Skipped when the tab has no prior data yet (nothing to
+    separate from), and never written to the CSV or counted in the "rows appended" total."""
     if not rows_to_append:
         return
 
     total = len(rows_to_append)
     written = 0
-    for start in range(0, total, SHEET_APPEND_BATCH_SIZE):
+    for i, start in enumerate(range(0, total, SHEET_APPEND_BATCH_SIZE)):
         batch = rows_to_append[start:start + SHEET_APPEND_BATCH_SIZE]
+        payload = ([[''] * len(CSV_HEADERS)] + batch) if (i == 0 and add_separator) else batch
         request = sheets_service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
             range=RANGE_NAME,
             valueInputOption='USER_ENTERED',
-            body={'values': batch}
+            body={'values': payload}
         )
         try:
             execute_with_backoff(request, logger, what=f"sheets append (rows {start + 1}-{start + len(batch)}/{total})")
@@ -1030,7 +1259,8 @@ def flush_sheet_writes(sheets_service, rows_to_append, logger):
                         f"the rest are safe in the local run CSV and can be pasted in manually if needed.")
             raise
 
-    logger.info(f"Appended {written} new row(s) to '{SHEET_NAME}'.")
+    logger.info(f"Appended {written} new row(s) to '{SHEET_NAME}'"
+                f"{' (with a separator row before them)' if add_separator else ''}.")
 
 
 # ==================== PER-EMAIL WORKER (for multitasked extraction) ====================
@@ -1043,7 +1273,7 @@ def process_one_email(brief, fetched, logger):
     msg = fetched.get(msg_id)
     if msg is None:
         logger.warning(f"Skipping message {msg_id} -- batch fetch failed for it.")
-        return msg_id, [], False
+        return msg_id, [], False, None
 
     headers = msg['payload'].get('headers', [])
     date = parse_email_date(next((h['value'] for h in headers if h['name'].lower() == 'date'), ''))
@@ -1072,12 +1302,13 @@ def process_one_email(brief, fetched, logger):
         j['message_id'] = msg_id
         j['gmail_link'] = gmail_link
 
-    return msg_id, jobs, True
+    return msg_id, jobs, True, platform
 
 
 # ==================== MAIN ====================
 
-def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed=False):
+def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed=False,
+         archive_existing=False):
     start_time = time.time()
     archive_old_logs()
     logger = setup_logging()
@@ -1086,6 +1317,12 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
         logger.info("Job listings scanner starting... (--export-processed-emails)")
         gmail_service, _ = get_google_services(logger)
         export_processed_emails_csv(gmail_service, logger)
+        return
+
+    if archive_existing:
+        logger.info("Job listings scanner starting... (--archive-existing-processed)")
+        gmail_service, _ = get_google_services(logger)
+        archive_existing_processed(gmail_service, logger)
         return
 
     logger.info(f"Job listings scanner starting... "
@@ -1136,13 +1373,17 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
     processed_ids = []
     completed = 0
     last_progress_log = time.time()
+    run_platform_counts = {}  # platform -> {'emails': n, 'jobs': n}, this run only
     with ThreadPoolExecutor(max_workers=CLASSIFY_WORKERS) as ex:
         futures = {ex.submit(process_one_email, brief, fetched, logger): brief for brief in briefs}
         for fut in as_completed(futures):
-            msg_id, jobs, fetch_ok = fut.result()
+            msg_id, jobs, fetch_ok, platform = fut.result()
             if fetch_ok:
                 processed_ids.append(msg_id)
                 stats['emails_scanned'] += 1
+                entry = run_platform_counts.setdefault(platform, {'emails': 0, 'jobs': 0})
+                entry['emails'] += 1
+                entry['jobs'] += len(jobs)
             all_jobs.extend(jobs)
 
             completed += 1
@@ -1172,9 +1413,13 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
         for j in all_jobs:
             status = "Needs Review" if (not j.get('location') or not j.get('comp')) else "OK"
             staffing = is_staffing_agency(j['company'])
+            us_eligible, eligibility_reason = classify_us_eligibility(j['location'], j['comp'])
+            notes = j.get('notes', '')
+            if eligibility_reason:
+                notes = f"{notes}; {eligibility_reason}" if notes else eligibility_reason
             row = [j['date'], j['title'], j['company'], j['location'], j['comp'], j['platform'],
-                   j['url'], j['message_id'], j['gmail_link'], j.get('notes', ''), status,
-                   "Yes" if staffing else "No"]
+                   j['url'], j['message_id'], j['gmail_link'], notes, status,
+                   "Yes" if staffing else "No", us_eligible]
 
             action, _, method = plan_row_action(existing_rows, rows_to_append, row, j['company'],
                                                  j['title'], staffing, logger)
@@ -1191,10 +1436,11 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
             print(f"\n{len(rows_to_append)} job(s) would be written to Sheets:")
             for row in rows_to_append:
                 agency_tag = " [AGENCY]" if row[11] == "Yes" else ""
-                print(f"  [{row[10]}]{agency_tag} {row[2]} -- {row[1]} ({row[3]}, {row[4] or 'comp n/a'}) [{row[5]}] {row[6]}")
+                eligibility_tag = " [NON-US]" if row[12] == "No" else ""
+                print(f"  [{row[10]}]{agency_tag}{eligibility_tag} {row[2]} -- {row[1]} ({row[3]}, {row[4] or 'comp n/a'}) [{row[5]}] {row[6]}")
         else:
             try:
-                flush_sheet_writes(sheets_service, rows_to_append, logger)
+                flush_sheet_writes(sheets_service, rows_to_append, logger, add_separator=bool(existing_rows))
             except Exception as e:
                 # Already logged in detail inside flush_sheet_writes (which rows made it,
                 # which didn't). Don't let a Sheets outage crash the whole run and don't mark
@@ -1210,11 +1456,14 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
             request = gmail_service.users().messages().batchModify(
                 userId='me',
                 body={'ids': processed_ids, 'addLabelIds': [processed_label_id],
-                      'removeLabelIds': [searches_label_id]}
+                      # Removing Gmail's system INBOX/UNREAD labels is what "archive" and
+                      # "mark as read" actually are under the hood -- so processed emails
+                      # drop out of the default inbox view instead of sitting there unread.
+                      'removeLabelIds': [searches_label_id, 'INBOX', 'UNREAD']}
             )
             execute_with_backoff(request, logger, what="gmail batchModify")
             logger.info(f"Marked {len(processed_ids)} email(s) as processed "
-                        f"(added IC, removed '{SEARCHES_LABEL}').")
+                        f"(added IC, removed '{SEARCHES_LABEL}', archived + marked read).")
         except Exception as e:
             # Sheets already has the data at this point -- worst case here is just that
             # these emails get harmlessly re-extracted next run instead of skipped.
@@ -1227,6 +1476,13 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
     elif processed_ids and sheet_write_failed:
         logger.info(f"Not marking {len(processed_ids)} email(s) as processed -- Sheets write "
                     f"didn't fully succeed this run, so they're left for next time.")
+
+    if run_platform_counts and not dry_run:
+        merged_stats = update_platform_stats(run_platform_counts, logger)
+        zero_yield_now = [p for p, c in run_platform_counts.items() if c['emails'] > 0 and c['jobs'] == 0]
+        if zero_yield_now:
+            logger.info(f"Zero jobs extracted this run from: {', '.join(sorted(zero_yield_now))} "
+                        f"(run --platform-report for the all-time picture before deciding to drop any).")
 
     stats['duration_secs'] = time.time() - start_time
     write_summary_log(stats)
@@ -1246,11 +1502,24 @@ if __name__ == '__main__':
     parser.add_argument('--export-processed-emails', action='store_true',
                          help="Write a local CSV listing every email ever marked processed (IC label), "
                               "all-time. Doesn't touch Sheets/Gmail labels -- just a local report, then exits.")
+    parser.add_argument('--archive-existing-processed', action='store_true',
+                         help="One-off cleanup: archive + mark-read every IC-labeled email still sitting "
+                              "in the inbox from before this behavior was added to normal runs. No "
+                              "extraction, no Sheets writes -- just label cleanup, then exits.")
+    parser.add_argument('--platform-report', action='store_true',
+                         help="Print the all-time per-source yield (emails seen vs. jobs extracted) from "
+                              "data/platform_stats.json, worst-yield first. Purely local, no Gmail/Sheets "
+                              "auth needed, then exits.")
     args = parser.parse_args()
+
+    if args.platform_report:
+        print_platform_report(load_platform_stats())
+        raise SystemExit(0)
 
     try:
         main(dry_run=args.dry_run, no_enrich=args.no_enrich,
-             reprocess_recent=args.reprocess_recent, export_processed=args.export_processed_emails)
+             reprocess_recent=args.reprocess_recent, export_processed=args.export_processed_emails,
+             archive_existing=args.archive_existing_processed)
     except Exception as e:
         try:
             logging.getLogger("JobListingsScanner").exception(f"CRITICAL ERROR: {e}")

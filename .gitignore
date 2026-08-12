@@ -8,6 +8,7 @@ temp/
 # Ignore scanner output (contains personal job search data)
 csv_output/
 archives/
+data/
 
 # Ignore Python cache files
 __pycache__/
@@ -17,6 +18,7 @@ venv/
 .venv/
 
 # Ignore log files
+logs/
 *.log
 *.log.*
 */*.log
