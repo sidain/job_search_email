@@ -1008,8 +1008,10 @@ def stage1_resolve_and_fetch(job, session, logger):
         return job
     try:
         _throttle_domain(url, logger)
+
         resp = session.get(url, headers=DEFAULT_HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
         job['url'] = resp.url  # unwrap the tracking redirect
+
         if resp.status_code >= 400:
             job['_page_text'] = None
             job['notes'] = f"Job page returned HTTP {resp.status_code}"
@@ -1024,7 +1026,6 @@ def stage1_resolve_and_fetch(job, session, logger):
         job['notes'] = f"Fetch failed: {e}"
         logger.warning(f"Enrichment fetch failed for {url}: {e}")
     return job
-
 
 def stage2_llm_fill(job, client, logger):
     """Fills in location/comp from the fetched page text via Ollama. Runs in the small
