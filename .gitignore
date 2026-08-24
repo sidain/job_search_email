@@ -1,34 +1,47 @@
-# Ignore environment variable files
+# 🔑 Environment & Secrets
 .env
+.env.local
+.env.*.local
 secrets/
 
-# Ignore temporary files and directories
-temp/
+# 📦 Dependencies & Build Outputs
+node_modules/
+dist/
+dist-ssr/
 
-# Ignore scanner output (contains personal job search data)
-csv_output/
-archives/
-data/
-
-# Ignore Python cache files
+# 🐍 Python Caches & Virtual Environments
 __pycache__/
-
-# Ignore virtual environment directories
 venv/
 .venv/
+*.pyc
+*.pyo
 
-# Ignore log files
+# 📊 Personal Data & Scanner Outputs
+archives/
+csv_output/
+data/
+docker/
+temp/
+
+# 📜 Logs & Debugging
 logs/
 *.log
 *.log.*
 */*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
 
-# Ignore compiled Python files
-*.pyc 
-*.pyo 
-
-# Ignore windows specific files
-Thumbs.db
-
-# Ignore macOS specific files
+# ⚙️ Editor, System & Cache Files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 .DS_Store
+Thumbs.db
+.vite/
+.eslintcache

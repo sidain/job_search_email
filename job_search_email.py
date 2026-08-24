@@ -51,6 +51,7 @@ import socket
 import ssl
 import threading
 import time
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -58,6 +59,8 @@ from urllib.parse import urlparse
 
 import ollama
 import requests
+import pymongo
+
 from bs4 import BeautifulSoup
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -68,6 +71,16 @@ from googleapiclient.errors import HttpError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+
+# Get the absolute path of the directory where this script is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Change the current working directory to the script's folder
+os.chdir(script_dir)
+print(f"Current working directory is now: {os.getcwd()}")
+
+
+
+
 # ==================== CONFIGURATION ====================
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.modify',
@@ -76,7 +89,6 @@ SCOPES = [
 
 SEARCHES_LABEL = '_ _ JOB SEARCH/a SEARCHES'
 PROCESSED_LABEL = '_ _ JOB SEARCH/IC'   # added on process; SEARCHES_LABEL is removed at the same time
-
 TWO_WEEKS_DAYS = 14   # only emails newer than this are considered
 
 # Same spreadsheet as job_search_email.py, new tab just for scanned listings.
@@ -174,6 +186,8 @@ STAFFING_AGENCY_KEYWORDS = [
     'sparks group', 'brooksource', 'improving', 'trigyn', 'systemone', 'system one',
     'consult solutions', 'sirius', 'motion recruitment partners', 'contract staffing',
 ]
+
+
 
 
 def is_staffing_agency(company: str) -> bool:
@@ -430,6 +444,74 @@ def _env(key: str, default: str = "") -> str:
     if val:
         return val
     return DOTENV_VALUES.get(key, default).strip()
+
+
+# --- Local MongoDB config (dedup cache + local mirror of job_listings rows) ---
+MONGO_URI = _env("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB_NAME = _env("MONGO_DB_NAME", "job_listings_scanner")
+MONGO_COLLECTION_NAME = _env("MONGO_COLLECTION_NAME", "job_listings")
+MONGO_ENABLED = _env("MONGO_ENABLED", "true").lower() not in ("false", "0", "no")
+
+def get_mongo_collection(logger):
+    if not MONGO_ENABLED:
+        logger.info("MongoDB integration is disabled via MONGO_ENABLED=false.")
+        return None
+
+    try:
+        client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        # Ping server to confirm connection
+        client.admin.command('ping')
+        db = client[MONGO_DB_NAME]
+        collection = db[MONGO_COLLECTION_NAME]
+        # Create unique index on title + company + message_id to prevent duplicate inserts
+        collection.create_index(
+            [("title", 1), ("company", 1), ("message_id", 1)], 
+            unique=True
+        )
+        return collection
+    except Exception as e:
+        logger.error(f"Failed to connect to MongoDB at {MONGO_URI}: {e}")
+        return None
+
+
+def save_jobs_to_mongo(jobs, collection, logger):
+    if collection is None or not jobs:
+        return 0
+
+    inserted_or_updated = 0
+
+    for j in jobs:
+        doc = {
+            "title": j.get("title", ""),
+            "company": j.get("company", ""),
+            "location": j.get("location", ""),  
+            "comp": j.get("comp", ""),
+            "platform": j.get("platform", ""),
+            "url": j.get("url", ""),
+            "message_id": j.get("message_id", ""),
+            "gmail_link": j.get("gmail_link", ""),
+            "notes": j.get("notes", ""),
+            "status": "Needs Review" if (not j.get('location') or not j.get('comp')) else "OK",
+            "is_staffing_agency": j.get("staffing_agency", ""),
+            "us_eligible": j.get("us_eligible", ""),
+            "last_updated": datetime.utcnow(),
+            }
+
+        filter_query = {
+            "title": doc["title"],
+            "company": doc["company"],
+            "message_id": doc["message_id"]
+        }
+
+        try:
+            collection.update_one(filter_query, {"$set": doc}, upsert=True)
+            inserted_or_updated += 1
+            logger.info(f"Updated job {doc['title']} at {doc['company']} in MongoDB.")
+        except Exception as e:
+            logger.error(f"Failed to upsert job {doc['title']} at {doc['company']} in MongoDB: {e}")
+
+    logger.info(f"Inserted/Updated {inserted_or_updated} job(s) into MongoDB.")
+    return inserted_or_updated
 
 
 # ==================== GOOGLE AUTH ====================
@@ -1308,10 +1390,12 @@ def process_one_email(brief, fetched, logger):
 # ==================== MAIN ====================
 
 def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed=False,
-         archive_existing=False):
+    archive_existing=False):
     start_time = time.time()
     archive_old_logs()
     logger = setup_logging()
+
+   
 
     if export_processed:
         logger.info("Job listings scanner starting... (--export-processed-emails)")
@@ -1414,7 +1498,12 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
             status = "Needs Review" if (not j.get('location') or not j.get('comp')) else "OK"
             staffing = is_staffing_agency(j['company'])
             us_eligible, eligibility_reason = classify_us_eligibility(j['location'], j['comp'])
+
+            j['staffing_agency'] = "Yes" if staffing else "No"
+            j['us_eligible'] = us_eligible
+
             notes = j.get('notes', '')
+
             if eligibility_reason:
                 notes = f"{notes}; {eligibility_reason}" if notes else eligibility_reason
             row = [j['date'], j['title'], j['company'], j['location'], j['comp'], j['platform'],
@@ -1440,6 +1529,9 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
                 print(f"  [{row[10]}]{agency_tag}{eligibility_tag} {row[2]} -- {row[1]} ({row[3]}, {row[4] or 'comp n/a'}) [{row[5]}] {row[6]}")
         else:
             try:
+                mongo_collection = get_mongo_collection(logger)
+                save_jobs_to_mongo(all_jobs, mongo_collection, logger)
+
                 flush_sheet_writes(sheets_service, rows_to_append, logger, add_separator=bool(existing_rows))
             except Exception as e:
                 # Already logged in detail inside flush_sheet_writes (which rows made it,
