@@ -11,12 +11,50 @@ function App() {
     const [selectedJobId, setSelectedJobId] = useState(null);
     const [deletedJobData, setDeletedJobData] = useState(null);
     const [undoTimer, setUndoTimer] = useState(null);
-    const [sortBy, setSortBy] = useState('date-desc');
-    const [searchTerm, setSearchTerm] = useState('');
-    const [remoteFilter, setRemoteFilter] = useState('all'); // 'all', 'remote', 'onsite'
-    const [usEligibleFilter, setUsEligibleFilter] = useState('all'); // 'all', 'yes', 'no'
-    const [platformFilter, setPlatformFilter] = useState('all'); // 'all' or specific platform
+    const [sortBy, setSortBy] = useState(localStorage.getItem('sortBy') || 'date-desc');
+    const [searchTerm, setSearchTerm] = useState(localStorage.getItem('searchTerm') || '');
+    const [remoteFilter, setRemoteFilter] = useState(localStorage.getItem('remoteFilter') || 'all');
+    const [platformFilter, setPlatformFilter] = useState(localStorage.getItem('platformFilter') || 'all');
+    const [usEligibleFilter, setUsEligibleFilter] = useState(localStorage.getItem('usEligibleFilter') || 'all');
 
+    useEffect(() => {
+        localStorage.setItem('searchTerm', searchTerm);
+    }, [searchTerm]);
+
+    useEffect(() => {
+        localStorage.setItem('remoteFilter', remoteFilter);
+    }, [remoteFilter]);
+
+    useEffect(() => {
+        localStorage.setItem('sortBy', sortBy);
+    }, [sortBy]);
+
+    useEffect(() => {
+        localStorage.setItem('setPlatformFilter', setPlatformFilter);
+    }, [setPlatformFilter]);
+
+    useEffect(() => {
+        localStorage.setItem('usEligibleFilter', usEligibleFilter);
+    }, [usEligibleFilter]);
+
+
+
+    const handleReset = () => {
+        setSearchTerm('');
+        localStorage.removeItem('searchTerm');
+
+        setRemoteFilter('all');
+        localStorage.removeItem('remoteFilter');
+
+        setSortBy( 'date-desc'); // Reset sortBy to 'all'
+        localStorage.removeItem('sortBy');
+        
+        setPlatformFilter('all');
+        localStorage.removeItem('platformFilter');
+
+        setUsEligibleFilter('all');
+        localStorage.removeItem('usEligibleFilter');
+    };
 
   const getMsgIdColor = (msgId) => {
     if(!msgId) return '#f0f0f0';
@@ -189,71 +227,47 @@ const filteredAndSortedJobs = [...jobs]
         (job.platform && job.platform.toLowerCase().includes(searchTerm.toLowerCase())) ||
         (job.location && job.location.toLowerCase().includes(searchTerm.toLowerCase()));
 
-        if (!matchesSearch) return false;
-
         // Remote Filter
-        if (remoteFilter === 'remote') {
-        const isRemote = job.location && job.location.toLowerCase().includes('remote');
-        if (!isRemote) return false;
-        } else if (remoteFilter === 'onsite') {
-        const isRemote = job.location && job.location.toLowerCase().includes('remote');
-        if (isRemote) return false;
-        }
+        const matchesRemoteFilter =
+            remoteFilter === 'all' ||
+            (remoteFilter === 'remote' && job.location.toLowerCase().includes('remote') ) ||
+            (remoteFilter === 'onsite' && !job.location.toLowerCase().includes('remote') );
 
         // US Eligible Filter
-        if (usEligibleFilter === 'yes' && !job.us_eligible) return false;
-        if (usEligibleFilter === 'no' && job.us_eligible) return false;
+        const matchesUsEligible =
+            usEligibleFilter === 'all' ||
+            ( usEligibleFilter === 'yes' && job.us_eligible) ||
+            ( usEligibleFilter === 'no' && !job.us_eligible) ;
+
+        
 
         // 🌐 Platform Filter
-        if (platformFilter !== 'all' && job.platform !== platformFilter) return false;
+        const matchPlatformFilter = 
+            platformFilter === 'all' ||
+            (platformFilter !== 'all' && job.platform === platformFilter ) 
 
-        return true;
+        return matchesSearch &&  matchesRemoteFilter &&  matchPlatformFilter && matchesUsEligible ;
     })
-    .filter((job) => {
-        // Search term matching (checks title, company, platform, location, or notes)
-        const matchesSearch = 
-        (job.title && job.title.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (job.company && job.company.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (job.platform && job.platform.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (job.location && job.location.toLowerCase().includes(searchTerm.toLowerCase()));
-
-    if (!matchesSearch) return false;
-
-    // Remote Filter
-    if (remoteFilter === 'remote') {
-      const isRemote = job.location && job.location.toLowerCase().includes('remote');
-      if (!isRemote) return false;
-    } else if (remoteFilter === 'onsite') {
-      const isRemote = job.location && job.location.toLowerCase().includes('remote');
-      if (isRemote) return false;
-    }
-
-    // US Eligible Filter
-    if (usEligibleFilter === 'yes' && !job.us_eligible) return false;
-    if (usEligibleFilter === 'no' && job.us_eligible) return false;
-
-    return true;
-  })
-  .sort((a, b) => {
-    switch (sortBy) {
-      case 'date-desc':
-        return new Date(b.date || 0) - new Date(a.date || 0);
-      case 'date-asc':
-        return new Date(a.date || 0) - new Date(b.date || 0);
-      case 'company-asc':
-        return (a.company || '').localeCompare(b.company || '');
-      case 'company-desc':
-        return (b.company || '').localeCompare(a.company || '');
-      case 'platform-asc':
-        return (a.platform || '').localeCompare(b.platform || '');
-      case 'platform-desc':
-        return (b.platform || '').localeCompare(a.platform || '');
-      case 'status':
-        return (a.status || '').localeCompare(b.status || '');
-      default:
-        return 0;
-    }
-  });
+    .sort((a, b) => {
+        switch (sortBy) {
+        case 'date-desc':
+            return new Date(b.date || 0) - new Date(a.date || 0);
+        case 'date-asc':
+            return new Date(a.date || 0) - new Date(b.date || 0);
+        case 'company-asc':
+            return (a.company || '').localeCompare(b.company || '');
+        case 'company-desc':
+            return (b.company || '').localeCompare(a.company || '');
+        case 'platform-asc':
+            return (a.platform || '').localeCompare(b.platform || '');
+        case 'platform-desc':
+            return (b.platform || '').localeCompare(a.platform || '');
+        case 'status':
+            return (a.status || '').localeCompare(b.status || '');
+        default:
+            return 0;
+        }
+    });
 
     // Extract unique platform options dynamically
     const uniquePlatforms = [...new Set(jobs.map(job => job.platform).filter(Boolean))].sort();
@@ -350,7 +364,7 @@ const filteredAndSortedJobs = [...jobs]
     </div>
 
         {/* Floating Sort Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', paddingBottom: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', paddingBottom: '4px' }}>
           <label htmlFor="sort-select" style={{ fontWeight: 'bold', color: '#555' }}>Sort by:</label>
           <select 
             id="sort-select"
@@ -376,6 +390,11 @@ const filteredAndSortedJobs = [...jobs]
             <option value="status">Status (A-Z)</option>
           </select>
         </div>
+
+        <div style={{ alignSelf: 'flex-end' }}>
+            <button style={{ cursor: 'pointer'  }} onClick={handleReset} >Reset</button>
+        </div>
+
       </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -509,88 +528,92 @@ const filteredAndSortedJobs = [...jobs]
               <p><strong>Compensation:</strong> {selectedJob.comp || 'Not specified'}</p>
               <p><strong>Platform:</strong> {selectedJob.platform || 'N/A'}</p>
 
-              {/* Confirmation Modal */}
-              <ConfirmModal
-                isOpen={isModalOpen}
-                onClose={() => setIsModalOpen(false)}
-                onConfirm={handleConfirmDelete}
-                title="Confirm Deletion"
-                message="Are you sure you want to remove this job listing? It will no longer appear in your active list."
-              />
+              
             </div>
 
-            {/* Embedded URL Section */}
-            {selectedJob.url && (
-              <div style={{ marginTop: '1.5rem', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ marginBottom: '1rem' }}>
-                  <a 
-                    href={selectedJob.url} 
-                    target="_blank" 
-                    rel="noopener noreferrer" 
-                    style={{ 
-                      display: 'inline-block',
-                      backgroundColor: '#0066cc',
-                      color: '#fff',
-                      padding: '0.5rem 1rem',
-                      borderRadius: '5px',
-                      textDecoration: 'none',
-                      fontWeight: 'bold',
-                      fontSize: '14px'
-                    }}
-                  >
-                    Open in new tab ↗
-                  </a>
-                </div>
-
+            <div style={{ 
+                display:'flex',
+                flexDirection:'column',
+                gap:'10px',marginTop: '1rem',
+                // justifyContent:'center'  
+                alignItems: 'center'
+                }}> 
                 {/* 📧 View Source Email in Gmail */}
                 {selectedJob.gmail_link && (
-                <div style={{ marginTop: '1rem' }}>
+                    <div style={{ marginTop: '1rem' }}>
+                        <a 
+                        href={selectedJob.gmail_link} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        style={{ 
+                            display: 'inline-block',
+                            textAlign: 'center',
+                            backgroundColor: '#ea4335', // Google Red color theme
+                            color: '#fff',
+                            padding: '0.4rem 0.8rem',
+                            borderRadius: '5px',
+                            textDecoration: 'none',
+                            fontWeight: 'bold',
+                            fontSize: '13px',
+                            width: '160px',
+                            boxSizing: 'border-box'
+                        }}
+                        >
+                            Open in Gmail ✉️
+                        </a>
+                    </div>
+                )}
+
+
+                {/* Embedded URL Section */}
+                {selectedJob.url && (
+                <div>
                     <a 
-                    href={selectedJob.gmail_link} 
-                    target="_blank" 
-                    rel="noopener noreferrer" 
-                    style={{ 
-                        display: 'inline-block',
-                        backgroundColor: '#ea4335', // Google Red color theme
-                        color: '#fff',
-                        padding: '0.5rem 1rem',
-                        borderRadius: '5px',
-                        textDecoration: 'none',
-                        fontWeight: 'bold',
-                        fontSize: '14px',
-                        marginRight: '10px'
-                    }}
+                        href={selectedJob.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        style={{ 
+                            display: 'inline-block',
+                            textAlign: 'center',
+                            backgroundColor: '#0066cc',
+                            color: '#fff',
+                            padding: '0.4rem 0.8rem',
+                            borderRadius: '5px',
+                            textDecoration: 'none',
+                            fontWeight: 'bold',
+                            fontSize: '13px',
+                            width: '160px',
+                            boxSizing: 'border-box'
+                        }}
                     >
-                    Open in Gmail ✉️
+                        Open in new tab ↗
                     </a>
                 </div>
                 )}
+            </div>
 
-                {/* 🖼️ Iframe preview */}
-                {/* <iframe 
-                  src={selectedJob.url} 
-                  title={`Job posting for ${selectedJob.title}`}
-                  style={{
-                    width: '100%',
-                    height: '600px',
-                    border: '1px solid #ddd',
-                    borderRadius: '8px'
-                  }}
-                /> */}
+            <div style={{marginTop: '10px'}}>
+                {/* Job Details Section */}
+                
+                <iframe src={`${selectedJob.url}`} width="100%" height="1024px" ></iframe>
+            </div>
 
 
-                {/* <iframe 
-                  src={`http://localhost:5000/api/proxy-job?url=${encodeURIComponent(selectedJob.url)}`}
-                  title="Job Preview"
-                  style={{ width: '100%', height: '600px', border: '1px solid #ccc' }}
-                /> */}
-              </div>
-            )}
+
           </div>
         ) : (
           <p style={{ color: '#888' }}>Select a job from the list on the left to view details.</p>
         )}
       </div>
+
+      {/* Confirmation Modal */}
+        <ConfirmModal
+            isOpen={isModalOpen}
+            onClose={() => setIsModalOpen(false)}
+            onConfirm={handleConfirmDelete}
+            title="Confirm Deletion"
+            message="Are you sure you want to remove this job listing? It will no longer appear in your active list."
+        />
 
       {/* 🪟 Undo Popup Banner */}
       {deletedJobData && (
