@@ -131,42 +131,63 @@ function App() {
 
 
 const handleDeleteJob = async (jobId) => {
+    if (!jobId) return;
+
+    // Find the job object before removing it locally so we can restore it if "Undo" is clicked
+    const jobToDelete = jobs.find((j) => j._id === jobId);
+
+    // Clear any existing active undo timer
+    if (undoTimer) {
+        clearTimeout(undoTimer);
+    }
+
+    try {
+        // Perform soft delete request
+        await axios.delete(`http://localhost:5000/api/jobs/${jobId}`);
+
+        // Update local state to remove it visually
+        setJobs((prevJobs) => {
+            const updatedJobs = prevJobs.filter((job) => job._id !== jobId);
+            if (selectedJob && selectedJob._id === jobId) {
+                setSelectedJob(updatedJobs.length > 0 ? updatedJobs[0] : null);
+            }
+            return updatedJobs;
+        });
+
+        // Hold onto the deleted job for the undo window
+        setDeletedJobData(jobToDelete);
+
+        // Set a 60-second timeout to clear the undo option
+        const timer = setTimeout(() => {
+            setDeletedJobData(null);
+            setUndoTimer(null);
+        }, 60000);
+
+        setUndoTimer(timer);
+    } catch (error) {
+        console.error("Error deleting job listing:", error);
+    }
+};
+
+const handlePatchJob = async (jobId, updatedFields) => {
   if (!jobId) return;
 
-  // Find the job object before removing it locally so we can restore it if "Undo" is clicked
-  const jobToDelete = jobs.find(j => j._id === jobId);
-
-  // Clear any existing active undo timer
-  if (undoTimer) {
-    clearTimeout(undoTimer);
-  }
-
   try {
-    // Perform soft delete request
-    await axios.delete(`http://localhost:5000/api/jobs/${jobId}`);
+    // Send PATCH request instead of PUT
+    const response = await axios.patch(`http://localhost:5000/api/jobs/${jobId}`, updatedFields);
+    const updatedJobFromServer = response.data.job;
 
-    // Update local state to remove it visually
-    setJobs((prevJobs) => {
-      const updatedJobs = prevJobs.filter((job) => job._id !== jobId);
-      if (selectedJob && selectedJob._id === jobId) {
-        setSelectedJob(updatedJobs.length > 0 ? updatedJobs[0] : null);
-      }
-      return updatedJobs;
-    });
+    // Update the local jobs state
+    setJobs((prevJobs) =>
+      prevJobs.map((job) => (job._id === jobId ? updatedJobFromServer : job))
+    );
 
-    // Hold onto the deleted job for the undo window
-    setDeletedJobData(jobToDelete);
-
-    // Set a 60-second timeout to clear the undo option
-    const timer = setTimeout(() => {
-      setDeletedJobData(null);
-      setUndoTimer(null);
-    }, 60000);
-
-    setUndoTimer(timer);
-
+    // Update selected job if it matches
+    if (selectedJob && selectedJob._id === jobId) {
+      setSelectedJob(updatedJobFromServer);
+    }
   } catch (error) {
-    console.error('Error deleting job listing:', error);
+    console.error('Error patching job listing:', error);
   }
 };
 
@@ -212,12 +233,7 @@ const handleUndoDelete = async () => {
       });
   }, []);
 
-  if (loading) return <div style={{ padding: '2rem' }}>🔄 Loading job listings...</div>;
-  if (error) return <div style={{ padding: '2rem', color: 'red' }}>❌ {error}</div>;
-
-
-
-// Filter and Sort combined
+  // Filter and Sort combined
 const filteredAndSortedJobs = [...jobs]
     .filter((job) => {
         // Search term matching
@@ -274,34 +290,24 @@ const filteredAndSortedJobs = [...jobs]
 
 
 
+
+  if (loading) return <div className="p-8" >🔄 Loading job listings...</div>;
+  if (error) return <div className="p-8 text-red-800">❌ {error}</div>;
+
+
+
   return (    
-    <div style={{ display: 'flex', minHeight: '100vh', fontFamily: 'sans-serif' }}>
+    <div className="flex min-h-screen font-sans">
 
       {/* 👈 Left Sidebar (1/3 Width) */}
-      <div style={{ 
-        flex: '1', 
-        borderRight: '1px solid #e0e0e0', 
-        backgroundColor: '#f9f9f9',
-        overflowY: 'auto',
-        maxHeight: '100vh',
-        position: 'relative' // Needed for sticky positioning context
-      }}>
+       <div className="flex-1 border-r border-gray-200 bg-gray-50 overflow-y-auto max-h-screen relative">
 
        {/* 📌 Sticky Header Container */}
-        <div style={{
-        position: 'sticky',
-        top: 0,
-        backgroundColor: '#f9f9f9',
-        padding: '1rem',
-        borderBottom: '10px solid #00ffff',
-        zIndex: 10,
-        boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px'
-        }}>
-
-        <h2 style={{ color: '#333', margin: '0 0 10px 0' }}>
+        <div className="flex flex-col gap-2 top-0 p-4 sticky bg-white z-10 shadow-md border-b border-gray-200">
+        
+        <h2 
+            style={{ color: '#111827' }}
+            className="text-[#111] font-bold text-[14px] m-0 mb-2">
             💼 Job Listings ({jobs.length})
         </h2>
 
@@ -311,26 +317,16 @@ const filteredAndSortedJobs = [...jobs]
             placeholder="Search title, company, location..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            style={{
-            padding: '6px 10px',
-            borderRadius: '4px',
-            border: '1px solid #ccc',
-            backgroundColor: '#fff', // 👈 Add explicit background color
-            color: '#333',          // 👈 Add explicit text color
-            fontSize: '12px',
-            outline: 'none',
-            width: '100%',
-            boxSizing: 'border-box'
-            }}
+            className="w-full box-border outline-none border border-gray-300 rounded px-3 py-1.5 bg-white text-neutral-800 text-xs"
         />
 
         {/* 🎛️ Filter Controls Row */}
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div className="flex gap-2">
             {/* Remote Filter */}
             <select 
-            value={remoteFilter}
-            onChange={(e) => setRemoteFilter(e.target.value)}
-            style={{ flex: 1, padding: '4px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '11px', color: '#333', backgroundColor: '#fff' }}
+                value={remoteFilter}
+                onChange={(e) => setRemoteFilter(e.target.value)}
+                className="flex-1 p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs"
             >
                 <option value="all">All Locations</option>
                 <option value="remote">Remote Only</option>
@@ -341,7 +337,7 @@ const filteredAndSortedJobs = [...jobs]
             <select 
             value={usEligibleFilter}
             onChange={(e) => setUsEligibleFilter(e.target.value)}
-            style={{ flex: 1, padding: '4px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '11px', color: '#333', backgroundColor: '#fff' }}
+            className="flex-1 p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs"
             >
                 <option value="all">US Eligible: All</option>
                 <option value="yes">US Eligible: Yes</option>
@@ -352,8 +348,8 @@ const filteredAndSortedJobs = [...jobs]
             <select 
                 value={platformFilter}
                 onChange={(e) => setPlatformFilter(e.target.value)}
-                style={{ flex: '1 1 100%', padding: '4px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '11px', color: '#333', backgroundColor: '#fff' }}
-                >
+                className="p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs basis-full"
+            >
                 <option value="all">All Platforms ({jobs.length})</option>
                 {uniquePlatforms.map((plat) => (
                 <option key={plat} value={plat}>
@@ -364,22 +360,16 @@ const filteredAndSortedJobs = [...jobs]
     </div>
 
         {/* Floating Sort Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', paddingBottom: '4px' }}>
-          <label htmlFor="sort-select" style={{ fontWeight: 'bold', color: '#555' }}>Sort by:</label>
+        <div className="flex items-center gap-4 text-xs pb-1">
+            <label htmlFor="sort-select" className="font-bold text-gray-600">
+                Sort by:
+            </label>
+
           <select 
             id="sort-select"
             value={sortBy} 
             onChange={(e) => setSortBy(e.target.value)}
-            style={{
-              padding: '4px 8px',
-              borderRadius: '4px',
-              border: '1px solid #ccc',
-              backgroundColor: '#fff',
-              color: '#333', // 👈 Add explicit text color
-              fontSize: '12px',
-              cursor: 'pointer',
-              flex: 1
-            }}
+            className="flex-1 py-1 px-2 border rounded border-gray-300 bg-white text-xs text-neutral-800 cursor-pointer"
           >
             <option value="date-desc">Newest Date</option>
             <option value="date-asc">Oldest Date</option>
@@ -391,13 +381,13 @@ const filteredAndSortedJobs = [...jobs]
           </select>
         </div>
 
-        <div style={{ alignSelf: 'flex-end' }}>
-            <button style={{ cursor: 'pointer'  }} onClick={handleReset} >Reset</button>
+        <div className="self-end">
+            <button className="cursor-pointer" onClick={handleReset}>Reset</button>
         </div>
 
       </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+        <div className="flex flex-col gap-4 p-4">
           {filteredAndSortedJobs.map((job) => {
 
             const isSelected = selectedJob && selectedJob._id === job._id;
@@ -406,94 +396,81 @@ const filteredAndSortedJobs = [...jobs]
               <div 
                 key={job._id} 
                 onClick={() => setSelectedJob(job)} // Select job on click 🖱️
+                className={`rounded-lg p-4 cursor-pointer transition-colors duration-200 text-xs text-left shadow-sm ${ isSelected ? 'border-2 border-blue-600 bg-blue-50' : 'border border-gray-200 bg-white hover:border-gray-300'}`}
+            >
 
-                style={{ 
-                  border: isSelected ? '2px solid #0066cc' : '1px solid #ccc', 
-                  borderRadius: '6px', 
-                  padding: '1rem',
-                  backgroundColor: isSelected ? '#e6f0ff' : '#fff',
-                  cursor: 'pointer',
-                  transition: 'background-color 0.2s',
-                  fontSize: '12px',
-                  textAlign: 'left',
-                }}
-              >
+                <div className="flex items-start justify-between gap-2 mb-2">
+                    
 
-                {/* Change job._id to selectedJob._id */}
-                <button style={{ 
-                  'float':'right' , 
-                  fontSize:'10px', 
-                  border: 'none',
-                  borderRadius:'4px',
-                  cursor: 'pointer',
-                  backgroundColor:'transparent'}} 
-                  onClick={(e) => {e.stopPropagation(); handleDeleteJob(job._id);}}>
-                    {/* Delete Job  ❌ */} ❌
-                </button>
-                <br />
-
-                <h3 style={{ textAlign: 'center', margin: '0 0 0.5rem 0', fontSize: '16px' }}>
-                  
-                  <div style={{
-                    fontSize: '10px',
-                    fontWeight: 'bold',
-                    lineHeight: 1,
-                    marginBottom: '5px',
-                  }}>
-                    <div>JobID: {job._id}</div>
-
-
-                    <div style={{
-                      backgroundColor: getMsgIdColor(job.message_id),
-                      padding: '2px 4px',
-                      borderRadius: '4px',
-                      display: 'inline-block',
-                      marginTop: '2px'
-                    }}>
-                      MsgId: {job.message_id || 'N/A'}
-                    </div>
-                  </div>
-
-                  <div style={{
-                    lineHeight:1.1,
-                  }}>
-                    <div style={{ marginBottom: '5px' }}>{job.title || 'Untitled Role'}</div>
-                    <div style={{fontSize:'10px',}}>{job.last_updated ? `Last Updated: ${new Date(job.last_updated).toLocaleDateString()}` : 'Last Updated: N/A'}</div>
-                  </div>
-
-
-                </h3>
-
-                <p style={{ margin: 0, color: '#555',  }}>
-                    <span><strong>Company:</strong> {job.company || 'N/A'}</span> <br />
-
-                    <p style={{ margin: 0, color: '#555' }}>
-                        <span><strong>Company:</strong> {job.company || 'N/A'}</span> <br />
-                        <span>
-                            <strong>Platform:</strong>{' '}
-                            <span style={{ color: getPlatformColor(job.platform), fontWeight: 'bold' }}>
-                            {job.platform || 'N/A'}
-                            </span>
+                    {/* 👈 Left side: Job ID and MsgId metadata */}
+                    <div className="flex flex-col gap-1 text-[8px] text-gray-400 leading-tight">
+                        <span className="text-[8px]">JobID: {job._id}</span>
+                        <span
+                            className="text-[8px] px-1.5 py-0.5 rounded inline-block w-fit"
+                            style={{ backgroundColor: getMsgIdColor(job.message_id) }}
+                        >
+                            MsgId: {job.message_id || 'N/A'}
                         </span>
-                    </p>
-                </p>
-                
-                <p style={{ margin: 0, color: '#555',  }}>
-                  <span style={{ float: 'left' }}><strong>Loc:</strong> {job.location || 'N/A'}</span>
-                  <span style={{ float: 'right' }}><strong>Emp Type:</strong> {job.is_staffing_agency ? 'Staffing Agency' : 'Direct Hire'}</span> 
-                  <br />
-                  
-                  <span style={{ float: 'left' }}><strong>US Eligible:</strong> {job.us_eligible ? 'Yes' : 'No'}</span>
-                  <span style={{ float: 'right' }}><strong> Comp:</strong> {job.comp|| 'N/A'}</span> <br />
-                </p>
-                
-            
+                    </div>
+
+                    {/* 👉 Right side: Delete and Apply buttons grouped together */}
+                    <div className="flex flex-col items-end gap-2 shrink-0">
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); handleDeleteJob(job._id); }}
+                            className="rounded text-xs bg-transparent cursor-pointer border-none text-gray-400 hover:text-red-600"
+                        >
+                            ❌
+                        </button>
 
 
+                        {job.status === 'Applied' ? (
+                            <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+                                Applied ✓
+                            </span>
+                        ) : (
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); handlePatchJob(job._id, { status: 'Applied' }); }}
+                                className="rounded text-xs bg-blue text-blue border border-emerald-200 px-2 py-0.5 hover:bg-emerald-100 cursor-pointer"
+                            >
+                                Apply
+                            </button>
+                        )}
+                    </div>
+                </div>
 
-                <p style={{ margin: 0, color: '#555', textAlign: 'center' }}>
-                  <span><strong>Status:</strong> {job.status|| 'N/A'}</span>
-                </p>
+
+                <div className="text-center mb-2">
+                    <h3 className="text-base font-semibold text-gray-900 mb-0.5 leading-snug">{job.title || 'Untitled Role'}</h3>
+                    <div className="text-[10px] text-gray-400">{job.last_updated ? `Last Updated: ${new Date(job.last_updated).toLocaleDateString()}` : 'Last Updated: N/A'}</div>
+                </div>
+
+                <div className="text-gray-600 space-y-1.5">
+                    <div><strong>Company:</strong> {job.company || 'N/A'}</div>
+
+                    <div>
+                        <strong>Platform:</strong>{' '}
+                        <span 
+                            style={{ color: getPlatformColor(job.platform) }}
+                            className="font-bold"
+                        >
+                        {job.platform || 'N/A'}
+                        </span>
+                    </div>
+
+                    <div className="flex justify-between gap-2">
+                      <span><strong>Loc:</strong> {job.location || 'N/A'}</span>
+                      <span><strong>Emp Type:</strong> {job.is_staffing_agency ? 'Staffing Agency' : 'Direct Hire'}</span>
+                    </div>
+
+                    <div className="flex justify-between gap-2">
+                      <span><strong>US Eligible:</strong> {job.us_eligible ? 'Yes' : 'No'}</span>
+                      <span><strong>Comp:</strong> {job.comp|| 'N/A'}</span>
+                    </div>
+
+                    <div className="text-center pt-1.5 mt-1 border-t border-gray-100">
+                      <strong>Status:</strong> {job.status|| 'N/A'}
+                    </div>
+                </div>
 
               </div>
             );
@@ -506,23 +483,27 @@ const filteredAndSortedJobs = [...jobs]
 
 
       {/* 👉 Main Content Area (2/3 Width) */}
-      <div style={{ flex: '2', padding: '2rem', overflowY: 'auto', maxHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+        <div className="flex flex-[2] flex-col p-8 overflow-y-auto max-h-screen">
+
         {selectedJob ? (
-          <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <div className="flex flex-col h-full">
             {/* Listing details */}
             <div>
-              <h1 style={{ fontSize: '24px' }}>{selectedJob.title || 'Untitled Role'}</h1>
+                <h1 className="text-[20px] font-bold text-[#111] leading-[32px] break-words mb-4">
+                {selectedJob.title || 'Untitled Role'}
+                </h1>
+                    
+                <button 
+                    onClick={(e) => {e.stopPropagation(); handleDeleteJob(selectedJob._id);}}
+                    className="mb-3 cursor-pointer bg-red-50 text-red-700 border border-red-200 rounded px-3 py-1.5 text-sm hover:bg-red-100"
+                >
+                    Delete Job 🗑️
+                </button>
 
-              {/* Change job._id to selectedJob._id */}
-              {/* <button onClick={() => handleOpenDeleteModal(selectedJob._id)}> */}
-              <button onClick={(e) => {e.stopPropagation(); handleDeleteJob(selectedJob._id);}}>
-                Delete Job 🗑️
-              </button>
-
-              <p style={{ fontSize: '1.2rem', color: '#333' }}>
+              <p className="text-[1.2rem] text-gray-800">
                 <strong>Company:</strong> {selectedJob.company || 'N/A'}
               </p>
-              <hr style={{ border: '0.5px solid #eee', margin: '1.5rem 0' }} />
+              <hr className="border-[0.5px] border-gray-200 my-6" />
               
               <p><strong>Location:</strong> {selectedJob.location || 'N/A'}</p>
               <p><strong>Compensation:</strong> {selectedJob.comp || 'Not specified'}</p>
@@ -531,39 +512,21 @@ const filteredAndSortedJobs = [...jobs]
               
             </div>
 
-            <div style={{ 
-                display:'flex',
-                flexDirection:'column',
-                gap:'10px',marginTop: '1rem',
-                // justifyContent:'center'  
-                alignItems: 'center'
-                }}> 
+            <div className="flex flex-col gap-2.5 mt-4 mb-6 items-center">
                 {/* 📧 View Source Email in Gmail */}
                 {selectedJob.gmail_link && (
-                    <div style={{ marginTop: '1rem' }}>
+                    <div>
                         <a 
                         href={selectedJob.gmail_link} 
                         target="_blank" 
                         rel="noopener noreferrer" 
-                        style={{ 
-                            display: 'inline-block',
-                            textAlign: 'center',
-                            backgroundColor: '#ea4335', // Google Red color theme
-                            color: '#fff',
-                            padding: '0.4rem 0.8rem',
-                            borderRadius: '5px',
-                            textDecoration: 'none',
-                            fontWeight: 'bold',
-                            fontSize: '13px',
-                            width: '160px',
-                            boxSizing: 'border-box'
-                        }}
+                        style={{ backgroundColor: '#ea4335', color: '#fff' }}
+                        className="inline-block box-border text-center py-1.5 px-3 rounded no-underline font-bold text-[13px] w-40 mb-2"
                         >
                             Open in Gmail ✉️
                         </a>
                     </div>
                 )}
-
 
                 {/* Embedded URL Section */}
                 {selectedJob.url && (
@@ -572,19 +535,8 @@ const filteredAndSortedJobs = [...jobs]
                         href={selectedJob.url} 
                         target="_blank" 
                         rel="noopener noreferrer" 
-                        style={{ 
-                            display: 'inline-block',
-                            textAlign: 'center',
-                            backgroundColor: '#0066cc',
-                            color: '#fff',
-                            padding: '0.4rem 0.8rem',
-                            borderRadius: '5px',
-                            textDecoration: 'none',
-                            fontWeight: 'bold',
-                            fontSize: '13px',
-                            width: '160px',
-                            boxSizing: 'border-box'
-                        }}
+                        style={{ backgroundColor: '#0066cc', color: '#fff' }}
+                        className="inline-block box-border text-center py-1.5 px-3 rounded no-underline font-bold text-[13px] w-40 mb-2"
                     >
                         Open in new tab ↗
                     </a>
@@ -592,17 +544,16 @@ const filteredAndSortedJobs = [...jobs]
                 )}
             </div>
 
-            <div style={{marginTop: '10px'}}>
+            <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                 {/* Job Details Section */}
                 
-                <iframe src={`${selectedJob.url}`} width="100%" height="1024px" ></iframe>
+                <iframe src={`${selectedJob.url}`} className="w-full h-screen block">
+                </iframe>
             </div>
-
-
 
           </div>
         ) : (
-          <p style={{ color: '#888' }}>Select a job from the list on the left to view details.</p>
+          <p className="text-gray-400">Select a job from the list on the left to view details.</p>
         )}
       </div>
 
@@ -617,34 +568,11 @@ const filteredAndSortedJobs = [...jobs]
 
       {/* 🪟 Undo Popup Banner */}
       {deletedJobData && (
-        <div style={{
-          position: 'fixed',
-          bottom: '20px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          backgroundColor: '#333',
-          color: '#fff',
-          padding: '12px 20px',
-          borderRadius: '8px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '15px',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-          zIndex: 1000,
-          fontSize: '14px'
-        }}>
+        <div className="items-center text-white text-sm bg-[#333] fixed flex gap-4 z-[1000] py-3 px-5 rounded-lg left-1/2 -translate-x-1/2 bottom-5 shadow-lg">
           <span>Deleted "{deletedJobData.title}"</span>
           <button 
             onClick={handleUndoDelete}
-            style={{
-              backgroundColor: '#0066cc',
-              color: '#fff',
-              border: 'none',
-              padding: '6px 12px',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontWeight: 'bold'
-            }}
+            className="hover:bg-blue-700 bg-blue-600 text-white rounded cursor-pointer font-bold px-3 py-1.5 border-none"
           >
             Undo
           </button>

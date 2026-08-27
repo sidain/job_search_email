@@ -53,6 +53,27 @@ app.get('/api/jobs', async (req, res) => {
     }
 });
 
+app.patch('/api/jobs/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Mongoose only updates the fields passed in req.body
+        const updatedJob = await Job.findByIdAndUpdate(
+            id, 
+            { $set: req.body }, 
+            { new: true, runValidators: true } // Returns the updated document
+        );
+
+        if (!updatedJob) {
+            return res.status(404).json({ message: 'Job not found' });
+        }
+
+        res.json({ message: 'Job updated successfully', job: updatedJob });
+    } catch (error) {
+        res.status(500).json({ message: 'Error updating job', error });
+    }
+});
+
 app.delete('/api/jobs/:id', async (req,res) => {
     try {
         // 🚩 Filter for active (non-deleted) jobs only
@@ -95,6 +116,8 @@ app.post('/api/jobs/:id/undo', async (req, res) => {
         res.status(500).json({ message: 'Error restoring job', error });
     }
 });
+
+
 
 
 app.listen(PORT, () => {
