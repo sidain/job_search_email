@@ -12,6 +12,7 @@ function App() {
     const [deletedJobData, setDeletedJobData] = useState(null);
     const [undoTimer, setUndoTimer] = useState(null);
     const [sortBy, setSortBy] = useState(localStorage.getItem('sortBy') || 'date-desc');
+    const [statusFilter, setStatusFilter] = useState(localStorage.getItem('statusFilter') || 'not_applied');
     const [searchTerm, setSearchTerm] = useState(localStorage.getItem('searchTerm') || '');
     const [remoteFilter, setRemoteFilter] = useState(localStorage.getItem('remoteFilter') || 'all');
     const [platformFilter, setPlatformFilter] = useState(localStorage.getItem('platformFilter') || 'all');
@@ -37,6 +38,10 @@ function App() {
         localStorage.setItem('usEligibleFilter', usEligibleFilter);
     }, [usEligibleFilter]);
 
+    useEffect(() => {
+        localStorage.setItem('statusFilter', statusFilter);
+    }, [statusFilter]);
+
 
 
     const handleReset = () => {
@@ -54,6 +59,9 @@ function App() {
 
         setUsEligibleFilter('all');
         localStorage.removeItem('usEligibleFilter');
+
+        setStatusFilter('all');
+        localStorage.removeItem('statusFilter');
     };
 
   const getMsgIdColor = (msgId) => {
@@ -74,6 +82,7 @@ function App() {
     if (p.includes('linkedin')) return '#0a66c2';        // LinkedIn Blue
     if (p.includes('indeed')) return '#003a9b';          // Indeed Dark Blue
     if (p.includes('glassdoor')) return '#0caa41';       // Glassdoor Green
+    if (p.includes('handshake')) return 'rgb(255, 230, 9)';       // 
     if (p.includes('google') || p.includes('job alerts from google')) return '#ea4335'; // Google Red
 
     return '#555'; // Default fallback color
@@ -255,14 +264,20 @@ const filteredAndSortedJobs = [...jobs]
             ( usEligibleFilter === 'yes' && job.us_eligible) ||
             ( usEligibleFilter === 'no' && !job.us_eligible) ;
 
-        
-
         // 🌐 Platform Filter
         const matchPlatformFilter = 
             platformFilter === 'all' ||
-            (platformFilter !== 'all' && job.platform === platformFilter ) 
+            (platformFilter !== 'all' && job.platform === platformFilter )
 
-        return matchesSearch &&  matchesRemoteFilter &&  matchPlatformFilter && matchesUsEligible ;
+        
+        // Status Filter
+        const matchStatusFilter=
+            statusFilter === "all" || 
+            (statusFilter === "applied" && job.status === "Applied") || 
+            (statusFilter === "not_applied" && job.status !== "Applied");
+
+
+        return matchesSearch &&  matchesRemoteFilter &&  matchPlatformFilter && matchesUsEligible && matchStatusFilter ;
     })
     .sort((a, b) => {
         switch (sortBy) {
@@ -288,7 +303,12 @@ const filteredAndSortedJobs = [...jobs]
     // Extract unique platform options dynamically
     const uniquePlatforms = [...new Set(jobs.map(job => job.platform).filter(Boolean))].sort();
 
-
+    // 📜 Job status data structure
+    const jobStatuses = [
+        { value: "all", label: "All" },
+        { value: "applied", label: "Applied" },
+        { value: "not_applied", label: "Not Applied" }
+    ];
 
 
   if (loading) return <div className="p-8" >🔄 Loading job listings...</div>;
@@ -344,11 +364,16 @@ const filteredAndSortedJobs = [...jobs]
                 <option value="no">US Eligible: No</option>
             </select>
 
+            
+    </div>
+
+    {/* 🎛️ Filter Controls Row */}
+        <div className="flex gap-2">
             {/* 🌐 Platform Dropdown Filter */}
             <select 
                 value={platformFilter}
                 onChange={(e) => setPlatformFilter(e.target.value)}
-                className="p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs basis-full"
+                className="p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs w-36 min-w-0 truncate"
             >
                 <option value="all">All Platforms ({jobs.length})</option>
                 {uniquePlatforms.map((plat) => (
@@ -357,7 +382,21 @@ const filteredAndSortedJobs = [...jobs]
                 </option>
                 ))}
             </select>
-    </div>
+
+            {/* 🌐 Status Dropdown Filter */}
+            <select 
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs w-24 min-w-0 truncate"
+            >
+                <option value="all">All({jobs.length})</option>
+                {jobStatuses.map((statusObj) => (
+                <option key={statusObj.value} value={statusObj.value}>
+                    {statusObj.label}
+                </option>
+                ))}
+            </select>
+        </div>
 
         {/* Floating Sort Controls */}
         <div className="flex items-center gap-4 text-xs pb-1">
@@ -430,7 +469,7 @@ const filteredAndSortedJobs = [...jobs]
                         ) : (
                             <button 
                                 onClick={(e) => { e.stopPropagation(); handlePatchJob(job._id, { status: 'Applied' }); }}
-                                className="rounded text-xs bg-blue text-blue border border-emerald-200 px-2 py-0.5 hover:bg-emerald-100 cursor-pointer"
+                                className="rounded text-xs bg-blue-600 text-white text-blue border border-emerald-200 px-2 py-0.5 hover:bg-emerald-100 cursor-pointer"
                             >
                                 Apply
                             </button>
@@ -488,26 +527,37 @@ const filteredAndSortedJobs = [...jobs]
         {selectedJob ? (
           <div className="flex flex-col h-full">
             {/* Listing details */}
-            <div>
-                <h1 className="text-[20px] font-bold text-[#111] leading-[32px] break-words mb-4">
-                {selectedJob.title || 'Untitled Role'}
+            <div style={{ marginBottom: "6px" }}>
+                <h1 
+                    style = {{ fontSize: '28px', lineHeight: '1.5'  }}
+                    className="font-bold  break-words mb-4"
+                >
+                    {selectedJob.title || 'Untitled Role'}
                 </h1>
                     
                 <button 
                     onClick={(e) => {e.stopPropagation(); handleDeleteJob(selectedJob._id);}}
-                    className="mb-3 cursor-pointer bg-red-50 text-red-700 border border-red-200 rounded px-3 py-1.5 text-sm hover:bg-red-100"
+                    className="mb-3 cursor-pointer bg-red-50 text-red-700 border border-red-200 rounded px-3 py-1.5 text-sm hover:bg-red-100 mb-2"
                 >
                     Delete Job 🗑️
                 </button>
 
-              <p className="text-[1.2rem] text-gray-800">
-                <strong>Company:</strong> {selectedJob.company || 'N/A'}
-              </p>
-              <hr className="border-[0.5px] border-gray-200 my-6" />
+                <hr className="border-[0.5px] border-gray-200 my-6" />
+                <p className="text-[1.2rem] text-gray-800">
+                    <strong>Company:</strong> {selectedJob.company || 'N/A'}
+                </p>
               
-              <p><strong>Location:</strong> {selectedJob.location || 'N/A'}</p>
-              <p><strong>Compensation:</strong> {selectedJob.comp || 'Not specified'}</p>
-              <p><strong>Platform:</strong> {selectedJob.platform || 'N/A'}</p>
+                <p>
+                    <strong>Location:</strong> {selectedJob.location || 'N/A'}
+                </p>
+                
+                <p>
+                    <strong>Compensation:</strong> {selectedJob.comp || 'Not specified'}
+                </p>
+                
+                <p>
+                    <strong>Platform:</strong> {selectedJob.platform || 'N/A'}
+                </p>
 
               
             </div>
