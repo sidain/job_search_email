@@ -11,7 +11,7 @@ function App() {
     const [selectedJobId, setSelectedJobId] = useState(null);
     const [deletedJobData, setDeletedJobData] = useState(null);
     const [undoTimer, setUndoTimer] = useState(null);
-    const [sortBy, setSortBy] = useState(localStorage.getItem('sortBy') || 'date-desc');
+    const [sortBy, setSortBy] = useState(localStorage.getItem('sortBy') || 'date-asc');
     const [statusFilter, setStatusFilter] = useState(localStorage.getItem('statusFilter') || 'not_applied');
     const [searchTerm, setSearchTerm] = useState(localStorage.getItem('searchTerm') || '');
     const [remoteFilter, setRemoteFilter] = useState(localStorage.getItem('remoteFilter') || 'all');
@@ -51,7 +51,7 @@ function App() {
         setRemoteFilter('all');
         localStorage.removeItem('remoteFilter');
 
-        setSortBy( 'date-desc'); // Reset sortBy to 'all'
+        setSortBy( 'date-asc'); // Reset sortBy to 'all'
         localStorage.removeItem('sortBy');
         
         setPlatformFilter('all');
@@ -410,8 +410,8 @@ const filteredAndSortedJobs = [...jobs]
             onChange={(e) => setSortBy(e.target.value)}
             className="flex-1 py-1 px-2 border rounded border-gray-300 bg-white text-xs text-neutral-800 cursor-pointer"
           >
-            <option value="date-desc">Newest Date</option>
-            <option value="date-asc">Oldest Date</option>
+            <option value="date-desc">Oldest Date</option>
+            <option value="date-asc">Newest Date</option>
             <option value="company-asc">Company Name (A-Z)</option>
             <option value="company-desc">Company Name (Z-A)</option>
             <option value="platform-asc">Platform (A-Z)</option>
@@ -489,8 +489,8 @@ const filteredAndSortedJobs = [...jobs]
                     <div>
                         <strong>Platform:</strong>{' '}
                         <span 
-                            style={{ color: getPlatformColor(job.platform) }}
-                            className="font-bold"
+                            style={{ backgroundColor: getPlatformColor(job.platform), color:'white' }}
+                            className="font-bold border rounded p-1 m-1"
                         >
                         {job.platform || 'N/A'}
                         </span>
@@ -543,23 +543,24 @@ const filteredAndSortedJobs = [...jobs]
                 </button>
 
                 <hr className="border-[0.5px] border-gray-200 my-6" />
-                <p className="text-[1.2rem] text-gray-800">
+
+
+                <p className="text-[1.2rem] ">
                     <strong>Company:</strong> {selectedJob.company || 'N/A'}
                 </p>
-              
-                <p>
-                    <strong>Location:</strong> {selectedJob.location || 'N/A'}
-                </p>
-                
-                <p>
-                    <strong>Compensation:</strong> {selectedJob.comp || 'Not specified'}
-                </p>
-                
+
                 <p>
                     <strong>Platform:</strong> {selectedJob.platform || 'N/A'}
                 </p>
 
-              
+                <p>
+                    <strong>Location:</strong> {selectedJob.location || 'N/A'}
+                </p>
+
+                <p>
+                    <strong>Compensation:</strong> {selectedJob.comp || 'Not specified'}
+                </p>
+
             </div>
 
             <div className="flex flex-col gap-2.5 mt-4 mb-6 items-center">
