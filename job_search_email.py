@@ -73,6 +73,7 @@ from urllib3.util.retry import Retry
 
 
 # Get the absolute path of the directory where this script is located
+ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 script_dir = os.path.dirname(os.path.abspath(__file__))
 # Change the current working directory to the script's folder
 os.chdir(script_dir)
@@ -102,11 +103,13 @@ TOKEN_PATH = 'secrets/token.json'          # fallback if not using .env token st
 CREDENTIALS_PATH = 'secrets/credentials.json'
 ENV_FILE = Path('./.env')
 
+CSV_DIR = Path('./csv_output')
 LOGS_DIR = Path('./logs')
 ARCHIVES_DIR = Path('./archives')
-CSV_DIR = Path('./csv_output')
+
 DATA_DIR = Path('./data')
 LOGS_ARCHIVE_DIR = ARCHIVES_DIR / 'logs'
+
 PLATFORM_STATS_PATH = DATA_DIR / 'platform_stats.json'  # persists across runs
 
 CSV_HEADERS = ["Date", "Title", "Company", "Location", "Comp", "Platform",
@@ -121,7 +124,11 @@ SUMMARY_LOG_FILE = LOGS_DIR / f"job_listings_{TIMESTAMP}_summary.log"
 CSV_PATH = CSV_DIR / f"job_listings_{RUN_DATE}_{TIMESTAMP}.csv"
 
 # --- Local LLM (Ollama) config ---
-OLLAMA_HOST = 'http://localhost:11434'
+# OLLAMA_HOST = 'http://localhost:11434'
+OLLAMA_HOST = ollama_url
+
+print(f"[DEBUG] OLLAMA_HOST = {OLLAMA_HOST}", flush=True)
+
 OLLAMA_MODEL = 'qwen2.5:14b-instruct'  # requires: ollama pull qwen2.5:14b-instruct (~9GB, fits comfortably in 20GB VRAM)
 OLLAMA_TEMPERATURE = 0.1
 
@@ -327,9 +334,12 @@ def archive_old_logs():
     """Moves any log files left over from previous runs into archives/logs/ so LOGS_DIR
     only ever contains the current run's files. Mirrors the archiving behavior used in the
     image_sort/url_organizer scripts."""
+
     if not LOGS_DIR.exists():
         return
+
     LOGS_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
     for f in LOGS_DIR.glob("job_listings_*.log"):
         try:
             shutil.move(str(f), str(LOGS_ARCHIVE_DIR / f.name))

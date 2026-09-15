@@ -1,4 +1,5 @@
-version: '3.8'
+
+name: jobtracker
 
 include:
   - ./mongodb-docker/docker-compose.yml # Adjust path if your folder name is different (e.g., ./mongodb/docker-compose.yml)
@@ -12,11 +13,16 @@ services:
     restart: always
     ports:
       - "5000:5000"
+    working_dir: /app/server
     environment:
       - MONGO_URI=mongodb://job-mongo:27017/your-database-name
       - PORT=5000
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:                                           # 👈 Add this block
+    - "host.docker.internal:host-gateway"
     volumes:
-      - ./server:/app
+      # - ./server:/app
+      - .:/app
       - /app/node_modules
     command: npm run dev
     depends_on:

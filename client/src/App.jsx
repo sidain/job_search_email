@@ -114,6 +114,37 @@ function App() {
     }
   };
 
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanMessage, setScanMessage] = useState('');
+
+  const handleRunEmailScan = async () => {
+    setIsScanning(true);
+    setScanMessage('Scanning emails...');
+
+    try{
+        const response = await axios.post('http://localhost:5000/api/jobs/emailScan', {
+            dryRun: false,
+            noEnrich: false,
+        });
+
+        setScanMessage(response.data.message);
+        
+        setTimeout(() => {
+            fetchJobs();
+            setIsScanning(false);            
+        },6000);
+
+
+
+    } catch(error){
+      console.error('Error scanning emails:', error);
+      setScanMessage('Error scanning emails');
+      setIsScanning(false);
+    }
+  };
+
+
+
   // Directly execute deletion without opening the confirm modal
   // const handleDeleteJob = async (jobId) => {
   //   if (!jobId) return;
@@ -222,24 +253,43 @@ const handleUndoDelete = async () => {
 };
 
 
+const fetchJobs = async () => {
+    axios.get('http://localhost:5000/api/jobs')
+        .then((response) => {
+            setJobs(response.data);
+
+            if( response.data.length > 0 && !selectedJob){
+                setSelectedJob(response.data[0]);
+            }
+
+            setLoading(false);
+        })
+        .catch((err) => {
+            console.log(' Error fetching data:', err);
+            setError('Failed to fetch data.');
+            setLoading(false);
+    });
+};
+
   useEffect(() => {
     // 1. Fetch data from our Node/Express API
-    axios.get('http://localhost:5000/api/jobs')
-      .then((response) => {
-        setJobs(response.data);
+    // axios.get('http://localhost:5000/api/jobs')
+    //   .then((response) => {
+    //     setJobs(response.data);
         
-        // Automatically select the first job if available
-        if (response.data.length > 0) {
-          setSelectedJob(response.data[0]);          
-        }
+    //     // Automatically select the first job if available
+    //     if (response.data.length > 0) {
+    //       setSelectedJob(response.data[0]);          
+    //     }
         
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error('Error fetching jobs:', err);
-        setError('Failed to load job listings.');
-        setLoading(false);
-      });
+    //     setLoading(false);
+    //   })
+    //   .catch((err) => {
+    //     console.error('Error fetching jobs:', err);
+    //     setError('Failed to load job listings.');
+    //     setLoading(false);
+    //   });
+        fetchJobs();
   }, []);
 
   // Filter and Sort combined
@@ -320,7 +370,8 @@ const filteredAndSortedJobs = [...jobs]
     <div className="flex min-h-screen font-sans">
 
       {/* 👈 Left Sidebar (1/3 Width) */}
-       <div className="flex-1 border-r border-gray-200 bg-gray-50 overflow-y-auto max-h-screen relative">
+       {/* <div className="w-[450px] shrink-0 flex-1 border-r border-gray-200 bg-gray-50 overflow-y-auto max-h-screen relative"> */}
+       <div className="w-[350px] shrink-0 border-r border-gray-200 bg-gray-50 overflow-y-auto max-h-screen relative flex flex-col">
 
        {/* 📌 Sticky Header Container */}
         <div className="flex flex-col gap-2 top-0 p-4 sticky bg-white z-10 shadow-md border-b border-gray-200">
@@ -523,6 +574,27 @@ const filteredAndSortedJobs = [...jobs]
 
       {/* 👉 Main Content Area (2/3 Width) */}
         <div className="flex flex-[2] flex-col p-8 overflow-y-auto max-h-screen">
+
+        {/* 👉 Tools bar */}
+        <div className="flex justify-between items-center w-full mb-4 px-2 py-1 bg-gray-600  border border-gray-300 shadow-md">
+            <label className="text-white font-bold text-sm "l>Tools: </label>
+
+            <button 
+                onClick={ (e)=> { e.stopPropagation(); handleRunEmailScan(); }} 
+                className="border rounded cursor-pointer border-gray-300 text-xs p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700"
+            >
+                Scan Emails
+            </button>
+            
+            <button className="border rounded cursor-pointer border-gray-300 text-xs p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700">
+                Scan Job Listings
+            </button>
+            
+            <button className="border rounded cursor-pointer border-gray-300 text-xs p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700">
+                Z
+            </button>
+        </div>
+
 
         {selectedJob ? (
           <div className="flex flex-col h-full">

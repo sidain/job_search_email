@@ -1,9 +1,18 @@
 FROM node:20-alpine
+
+# Install Python 3 inside Alpine container
+RUN apk add --no-cache python3 py3-pip
+
+
 WORKDIR /app
 # Copy package files first to leverage Docker layer caching
 COPY package*.json ./
 # Install dependencies
 RUN npm install
+
+# Install required Python packages for your job search scripts
+RUN pip install --no-cache-dir ollama pymongo requests beautifulsoup4 google-api-python-client google-auth-oauthlib --break-system-packages
+
 # Copy the rest of the server code
 COPY . .
 EXPOSE 5000

@@ -10,3 +10,5 @@ services:
 
 volumes:
   mongo_data:
+    external: true
+    name: mongodb-docker_mongo_data   # <-- the volume that already has your records
