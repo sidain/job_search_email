@@ -4,19 +4,371 @@ import ConfirmModal from './components/ConfirmModal';
 
 function App() {
     const [jobs, setJobs] = useState([]);
-    const [selectedJob, setSelectedJob] = useState(null); // Tracks clicked job 🎯
+    const [selectedJob, setSelectedJob] = useState(null); 
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [selectedJobId, setSelectedJobId] = useState(null);
+
     const [deletedJobData, setDeletedJobData] = useState(null);
     const [undoTimer, setUndoTimer] = useState(null);
+
     const [sortBy, setSortBy] = useState(localStorage.getItem('sortBy') || 'date-asc');
-    const [statusFilter, setStatusFilter] = useState(localStorage.getItem('statusFilter') || 'not_applied');
+    
     const [searchTerm, setSearchTerm] = useState(localStorage.getItem('searchTerm') || '');
+    
+    const [statusFilter, setStatusFilter] = useState(localStorage.getItem('statusFilter') || 'not_applied');
     const [remoteFilter, setRemoteFilter] = useState(localStorage.getItem('remoteFilter') || 'all');
-    const [platformFilter, setPlatformFilter] = useState(localStorage.getItem('platformFilter') || 'all');
     const [usEligibleFilter, setUsEligibleFilter] = useState(localStorage.getItem('usEligibleFilter') || 'all');
+
+    const [isScanning, setIsScanning] = useState(false);
+    const [scanMessage, setScanMessage] = useState('');
+
+
+
+    // Extract unique platform options dynamically
+    const uniquePlatforms = [...new Set(jobs.map(job => job.platform).filter(Boolean))].sort();
+
+    const [isPlatformDropdownOpen, setIsPlatformDropdownOpen] = useState(false);
+
+    // Initialize state to show all by default if nothing is stored in localStorage
+    const [platformFilter, setPlatformFilter] = useState(() => {
+        const saved = localStorage.getItem('platformFilter');
+        if (saved) {
+            try {
+                return JSON.parse(saved);
+            } catch (e) {
+                return [];
+            }
+        }
+        // Default to all unique platforms so everything shows by default
+        return uniquePlatforms;
+    });
+
+    // 📜 Job status data structure
+    const jobStatuses = [
+        { value: "all", label: "All" },
+        { value: "applied", label: "Applied" },
+        { value: "not_applied", label: "Not Applied" }
+    ];
+
+    const handleReset = () => {
+        setSearchTerm('');
+        localStorage.removeItem('searchTerm');
+
+        setRemoteFilter('all');
+        localStorage.removeItem('remoteFilter');
+
+        setSortBy( 'date-asc'); // Reset sortBy to 'all'
+        localStorage.removeItem('sortBy');
+        
+        // setPlatformFilter(['all']);
+        // localStorage.removeItem('platformFilter');
+
+        // Reset platform filter back to all unique platforms
+        setPlatformFilter(uniquePlatforms);
+        localStorage.removeItem('platformFilter');
+
+        setUsEligibleFilter('all');
+        localStorage.removeItem('usEligibleFilter');
+
+        setStatusFilter('all');
+        localStorage.removeItem('statusFilter');
+    };
+
+    // Filter and Sort combined
+    const filteredAndSortedJobs = [...jobs]
+        .filter((job) => {
+            // Search term matching
+            const matchesSearch = 
+            (job.title && job.title.toLowerCase().includes(searchTerm.toLowerCase())) ||
+            (job.company && job.company.toLowerCase().includes(searchTerm.toLowerCase())) ||
+            (job.platform && job.platform.toLowerCase().includes(searchTerm.toLowerCase())) ||
+            (job.location && job.location.toLowerCase().includes(searchTerm.toLowerCase()));
+
+            // Remote Filter
+            const matchesRemoteFilter =
+                remoteFilter === 'all' ||
+                (remoteFilter === 'remote' && job.location.toLowerCase().includes('remote') ) ||
+                (remoteFilter === 'onsite' && !job.location.toLowerCase().includes('remote') );
+
+            // US Eligible Filter
+            const matchesUsEligible =
+                usEligibleFilter === 'all' ||
+                ( usEligibleFilter === 'yes' && job.us_eligible) ||
+                ( usEligibleFilter === 'no' && !job.us_eligible) ;
+
+            // 🌐 Platform Filter (Multi-select check)
+            const matchPlatformFilter = 
+                platformFilter.length === 0 || 
+                platformFilter.includes(job.platform);
+
+            
+            // Status Filter
+            const matchStatusFilter=
+                statusFilter === "all" || 
+                (statusFilter === "applied" && job.status === "Applied") || 
+                (statusFilter === "not_applied" && job.status !== "Applied");
+
+
+            return matchesSearch &&  matchesRemoteFilter &&  matchPlatformFilter && matchesUsEligible && matchStatusFilter ;
+        })
+        .sort((a, b) => {
+            switch (sortBy) {
+            case 'date-desc':
+                return new Date(b.date || 0) - new Date(a.date || 0);
+            case 'date-asc':
+                return new Date(a.date || 0) - new Date(b.date || 0);
+            case 'company-asc':
+                return (a.company || '').localeCompare(b.company || '');
+            case 'company-desc':
+                return (b.company || '').localeCompare(a.company || '');
+            case 'platform-asc':
+                return (a.platform || '').localeCompare(b.platform || '');
+            case 'platform-desc':
+                return (b.platform || '').localeCompare(a.platform || '');
+            case 'status':
+                return (a.status || '').localeCompare(b.status || '');
+            default:
+                return 0;
+            }
+    });
+
+
+
+    const fetchJobs = async () => {
+        axios.get('http://localhost:5000/api/jobs')
+            .then((response) => {
+                setJobs(response.data);
+
+                if( response.data.length > 0 && !selectedJob){
+                    setSelectedJob(response.data[0]);
+                }
+
+                setLoading(false);
+            })
+            .catch((err) => {
+                console.log(' Error fetching data:', err);
+                setError('Failed to fetch data.');
+                setLoading(false);
+        });
+    };
+
+
+
+    const getMsgIdColor = (msgId) => {
+        if(!msgId) return '#f0f0f0';
+            let hash = 0;
+        for(let i = 0; i < msgId.length; i++) {
+            hash += msgId.charCodeAt(i) + ((hash << 5) - hash );
+        }
+
+        const hue = Math.abs( hash) % 360;
+
+        return `hsl(${hue}, 70%, 85%)`;
+    };
+
+
+    const getPlatformColor = (platform) => {
+        if (!platform) return '#333';
+        const p = platform.toLowerCase();
+
+        if (p.includes('linkedin')) return '#0a66c2';        // LinkedIn Blue
+        if (p.includes('indeed')) return '#003a9b';          // Indeed Dark Blue
+        if (p.includes('glassdoor')) return '#0caa41';       // Glassdoor Green
+        if (p.includes('handshake')) return 'rgb(255, 230, 9)';       // 
+        if (p.includes('google') || p.includes('job alerts from google')) return '#ea4335'; // Google Red
+
+        return '#555'; // Default fallback color
+    };
+
+
+    // 1. Open modal when user clicks delete icon on a job card
+    const handleOpenDeleteModal = (jobId) => {
+        setSelectedJobId(jobId);
+        setIsModalOpen(true);
+    };
+
+
+    // 2. Execute deletion when confirmed inside modal
+    const handleConfirmDelete = async () => {
+        if (!selectedJobId) return;
+
+        try {
+        // API call to Express backend
+        await axios.delete(`http://localhost:5000/api/jobs/${selectedJobId}`);
+
+        // Update state to remove deleted job instantly
+        setJobs((prevJobs) => prevJobs.filter((job) => job._id !== selectedJobId));
+
+        // Close modal reset state
+        setIsModalOpen(false);
+        setSelectedJobId(null);
+        } catch (error) {
+        console.error('Error deleting job listing:', error);
+        }
+    };
+
+
+    const handleRunEmailScan = async () => {
+        setIsScanning(true);
+        setScanMessage('Scanning emails...');
+
+        try{
+            const response = await axios.post('http://localhost:5000/api/jobs/emailScan', {
+                dryRun: false,
+                noEnrich: false,
+            });
+
+            setScanMessage(response.data.message || 'Scanning emails in background');
+
+            const pollInterval = setInterval( async () => {
+                try{
+                    const statusRes = await axios.get('http://localhost:5000/api/jobs/emailScan/status');
+
+                    if( !statusRes.data.isScanning ){
+                        clearInterval( pollInterval );
+
+                        fetchJobs();
+                        setIsScanning(false);
+
+                        const durationMsg = statusRes.data.duration 
+                            ? `Email scan complete (${statusRes.data.duration}s)` 
+                            : 'Email scan complete!';
+
+                        setScanMessage(durationMsg);
+
+                        // Auto-hide success message after 6 seconds
+                        setTimeout(() => {
+                            setScanMessage('');
+                        }, 6000);
+                    }
+
+                } catch( pollErr ){
+                    console.error("Error checking scan status", pollErr);
+                }
+            }, 5000);
+
+
+        } catch(error){
+            console.error('Error scanning emails:', error);
+            setScanMessage('Error scanning emails');
+            setIsScanning(false);
+        }
+    };
+
+
+
+    // Directly execute deletion without opening the confirm modal
+    // const handleDeleteJob = async (jobId) => {
+    //   if (!jobId) return;
+
+    //   try {
+    //     // API call to Express backend
+    //     await axios.delete(`http://localhost:5000/api/jobs/${jobId}`);
+
+    //     // Update state to remove deleted job instantly
+    //     setJobs((prevJobs) => {
+    //       const updatedJobs = prevJobs.filter((job) => job._id !== jobId);
+            
+    //       // If the currently selected job is the one being deleted, clear or shift selection
+    //       if (selectedJob && selectedJob._id === jobId) {
+    //         setSelectedJob(updatedJobs.length > 0 ? updatedJobs[0] : null);
+    //       }
+
+    //       return updatedJobs;
+    //     });
+    //   } catch (error) {
+    //     console.error('Error deleting job listing:', error);
+    //   }
+    // };
+
+
+    const handleDeleteJob = async (jobId) => {
+        if (!jobId) return;
+
+        // Find the job object before removing it locally so we can restore it if "Undo" is clicked
+        const jobToDelete = jobs.find((j) => j._id === jobId);
+
+        // Clear any existing active undo timer
+        if (undoTimer) {
+            clearTimeout(undoTimer);
+        }
+
+        try {
+            // Perform soft delete request
+            await axios.delete(`http://localhost:5000/api/jobs/${jobId}`);
+
+            // Update local state to remove it visually
+            setJobs((prevJobs) => {
+                const updatedJobs = prevJobs.filter((job) => job._id !== jobId);
+                if (selectedJob && selectedJob._id === jobId) {
+                    setSelectedJob(updatedJobs.length > 0 ? updatedJobs[0] : null);
+                }
+                return updatedJobs;
+            });
+
+            // Hold onto the deleted job for the undo window
+            setDeletedJobData(jobToDelete);
+
+            // Set a 60-second timeout to clear the undo option
+            const timer = setTimeout(() => {
+                setDeletedJobData(null);
+                setUndoTimer(null);
+            }, 60000);
+
+            setUndoTimer(timer);
+        } catch (error) {
+            console.error("Error deleting job listing:", error);
+        }
+    };
+
+    const handlePatchJob = async (jobId, updatedFields) => {
+    if (!jobId) return;
+
+    try {
+        // Send PATCH request instead of PUT
+        const response = await axios.patch(`http://localhost:5000/api/jobs/${jobId}`, updatedFields);
+        const updatedJobFromServer = response.data.job;
+
+        // Update the local jobs state
+        setJobs((prevJobs) =>
+        prevJobs.map((job) => (job._id === jobId ? updatedJobFromServer : job))
+        );
+
+        // Update selected job if it matches
+        if (selectedJob && selectedJob._id === jobId) {
+        setSelectedJob(updatedJobFromServer);
+        }
+    } catch (error) {
+        console.error('Error patching job listing:', error);
+    }
+    };
+
+    // Add the handleUndo function
+    const handleUndoDelete = async () => {
+        if (!deletedJobData) return;
+
+        if (undoTimer) {
+            clearTimeout(undoTimer);
+            setUndoTimer(null);
+        }
+
+        try {
+            await axios.post(`http://localhost:5000/api/jobs/${deletedJobData._id}/undo`);
+
+            // Put the job back into the list
+            setJobs((prevJobs) => [deletedJobData, ...prevJobs]);
+            setSelectedJob(deletedJobData);
+            setDeletedJobData(null);
+        } catch (error) {
+            console.error('Error undoing deletion:', error);
+        }
+    };
+
+ 
+
+
 
     useEffect(() => {
         localStorage.setItem('searchTerm', searchTerm);
@@ -31,8 +383,8 @@ function App() {
     }, [sortBy]);
 
     useEffect(() => {
-        localStorage.setItem('setPlatformFilter', setPlatformFilter);
-    }, [setPlatformFilter]);
+        localStorage.setItem('platformFilter', JSON.stringify(platformFilter));
+    }, [platformFilter]);
 
     useEffect(() => {
         localStorage.setItem('usEligibleFilter', usEligibleFilter);
@@ -42,236 +394,7 @@ function App() {
         localStorage.setItem('statusFilter', statusFilter);
     }, [statusFilter]);
 
-
-
-    const handleReset = () => {
-        setSearchTerm('');
-        localStorage.removeItem('searchTerm');
-
-        setRemoteFilter('all');
-        localStorage.removeItem('remoteFilter');
-
-        setSortBy( 'date-asc'); // Reset sortBy to 'all'
-        localStorage.removeItem('sortBy');
-        
-        setPlatformFilter('all');
-        localStorage.removeItem('platformFilter');
-
-        setUsEligibleFilter('all');
-        localStorage.removeItem('usEligibleFilter');
-
-        setStatusFilter('all');
-        localStorage.removeItem('statusFilter');
-    };
-
-  const getMsgIdColor = (msgId) => {
-    if(!msgId) return '#f0f0f0';
-    let hash = 0;
-    for(let i = 0; i < msgId.length; i++) {
-        hash += msgId.charCodeAt(i) + ((hash << 5) - hash );
-    }
-    const hue = Math.abs( hash) % 360;
-    return `hsl(${hue}, 70%, 85%)`;
-  };
-
-
-  const getPlatformColor = (platform) => {
-    if (!platform) return '#333';
-    const p = platform.toLowerCase();
-
-    if (p.includes('linkedin')) return '#0a66c2';        // LinkedIn Blue
-    if (p.includes('indeed')) return '#003a9b';          // Indeed Dark Blue
-    if (p.includes('glassdoor')) return '#0caa41';       // Glassdoor Green
-    if (p.includes('handshake')) return 'rgb(255, 230, 9)';       // 
-    if (p.includes('google') || p.includes('job alerts from google')) return '#ea4335'; // Google Red
-
-    return '#555'; // Default fallback color
-};
-
-
-// 1. Open modal when user clicks delete icon on a job card
-  const handleOpenDeleteModal = (jobId) => {
-    setSelectedJobId(jobId);
-    setIsModalOpen(true);
-  };
-
-  // 2. Execute deletion when confirmed inside modal
-  const handleConfirmDelete = async () => {
-    if (!selectedJobId) return;
-
-    try {
-      // API call to Express backend
-      await axios.delete(`http://localhost:5000/api/jobs/${selectedJobId}`);
-
-      // Update state to remove deleted job instantly
-      setJobs((prevJobs) => prevJobs.filter((job) => job._id !== selectedJobId));
-
-      // Close modal reset state
-      setIsModalOpen(false);
-      setSelectedJobId(null);
-    } catch (error) {
-      console.error('Error deleting job listing:', error);
-    }
-  };
-
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanMessage, setScanMessage] = useState('');
-
-  const handleRunEmailScan = async () => {
-    setIsScanning(true);
-    setScanMessage('Scanning emails...');
-
-    try{
-        const response = await axios.post('http://localhost:5000/api/jobs/emailScan', {
-            dryRun: false,
-            noEnrich: false,
-        });
-
-        setScanMessage(response.data.message);
-        
-        setTimeout(() => {
-            fetchJobs();
-            setIsScanning(false);            
-        },6000);
-
-
-
-    } catch(error){
-      console.error('Error scanning emails:', error);
-      setScanMessage('Error scanning emails');
-      setIsScanning(false);
-    }
-  };
-
-
-
-  // Directly execute deletion without opening the confirm modal
-  // const handleDeleteJob = async (jobId) => {
-  //   if (!jobId) return;
-
-  //   try {
-  //     // API call to Express backend
-  //     await axios.delete(`http://localhost:5000/api/jobs/${jobId}`);
-
-  //     // Update state to remove deleted job instantly
-  //     setJobs((prevJobs) => {
-  //       const updatedJobs = prevJobs.filter((job) => job._id !== jobId);
-        
-  //       // If the currently selected job is the one being deleted, clear or shift selection
-  //       if (selectedJob && selectedJob._id === jobId) {
-  //         setSelectedJob(updatedJobs.length > 0 ? updatedJobs[0] : null);
-  //       }
-
-  //       return updatedJobs;
-  //     });
-  //   } catch (error) {
-  //     console.error('Error deleting job listing:', error);
-  //   }
-  // };
-
-
-const handleDeleteJob = async (jobId) => {
-    if (!jobId) return;
-
-    // Find the job object before removing it locally so we can restore it if "Undo" is clicked
-    const jobToDelete = jobs.find((j) => j._id === jobId);
-
-    // Clear any existing active undo timer
-    if (undoTimer) {
-        clearTimeout(undoTimer);
-    }
-
-    try {
-        // Perform soft delete request
-        await axios.delete(`http://localhost:5000/api/jobs/${jobId}`);
-
-        // Update local state to remove it visually
-        setJobs((prevJobs) => {
-            const updatedJobs = prevJobs.filter((job) => job._id !== jobId);
-            if (selectedJob && selectedJob._id === jobId) {
-                setSelectedJob(updatedJobs.length > 0 ? updatedJobs[0] : null);
-            }
-            return updatedJobs;
-        });
-
-        // Hold onto the deleted job for the undo window
-        setDeletedJobData(jobToDelete);
-
-        // Set a 60-second timeout to clear the undo option
-        const timer = setTimeout(() => {
-            setDeletedJobData(null);
-            setUndoTimer(null);
-        }, 60000);
-
-        setUndoTimer(timer);
-    } catch (error) {
-        console.error("Error deleting job listing:", error);
-    }
-};
-
-const handlePatchJob = async (jobId, updatedFields) => {
-  if (!jobId) return;
-
-  try {
-    // Send PATCH request instead of PUT
-    const response = await axios.patch(`http://localhost:5000/api/jobs/${jobId}`, updatedFields);
-    const updatedJobFromServer = response.data.job;
-
-    // Update the local jobs state
-    setJobs((prevJobs) =>
-      prevJobs.map((job) => (job._id === jobId ? updatedJobFromServer : job))
-    );
-
-    // Update selected job if it matches
-    if (selectedJob && selectedJob._id === jobId) {
-      setSelectedJob(updatedJobFromServer);
-    }
-  } catch (error) {
-    console.error('Error patching job listing:', error);
-  }
-};
-
-// Add the handleUndo function
-const handleUndoDelete = async () => {
-  if (!deletedJobData) return;
-
-  if (undoTimer) {
-    clearTimeout(undoTimer);
-    setUndoTimer(null);
-  }
-
-  try {
-    await axios.post(`http://localhost:5000/api/jobs/${deletedJobData._id}/undo`);
-
-    // Put the job back into the list
-    setJobs((prevJobs) => [deletedJobData, ...prevJobs]);
-    setSelectedJob(deletedJobData);
-    setDeletedJobData(null);
-  } catch (error) {
-    console.error('Error undoing deletion:', error);
-  }
-};
-
-
-const fetchJobs = async () => {
-    axios.get('http://localhost:5000/api/jobs')
-        .then((response) => {
-            setJobs(response.data);
-
-            if( response.data.length > 0 && !selectedJob){
-                setSelectedJob(response.data[0]);
-            }
-
-            setLoading(false);
-        })
-        .catch((err) => {
-            console.log(' Error fetching data:', err);
-            setError('Failed to fetch data.');
-            setLoading(false);
-    });
-};
-
-  useEffect(() => {
+    useEffect(() => {
     // 1. Fetch data from our Node/Express API
     // axios.get('http://localhost:5000/api/jobs')
     //   .then((response) => {
@@ -292,73 +415,8 @@ const fetchJobs = async () => {
         fetchJobs();
   }, []);
 
-  // Filter and Sort combined
-const filteredAndSortedJobs = [...jobs]
-    .filter((job) => {
-        // Search term matching
-        const matchesSearch = 
-        (job.title && job.title.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (job.company && job.company.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (job.platform && job.platform.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (job.location && job.location.toLowerCase().includes(searchTerm.toLowerCase()));
-
-        // Remote Filter
-        const matchesRemoteFilter =
-            remoteFilter === 'all' ||
-            (remoteFilter === 'remote' && job.location.toLowerCase().includes('remote') ) ||
-            (remoteFilter === 'onsite' && !job.location.toLowerCase().includes('remote') );
-
-        // US Eligible Filter
-        const matchesUsEligible =
-            usEligibleFilter === 'all' ||
-            ( usEligibleFilter === 'yes' && job.us_eligible) ||
-            ( usEligibleFilter === 'no' && !job.us_eligible) ;
-
-        // 🌐 Platform Filter
-        const matchPlatformFilter = 
-            platformFilter === 'all' ||
-            (platformFilter !== 'all' && job.platform === platformFilter )
-
-        
-        // Status Filter
-        const matchStatusFilter=
-            statusFilter === "all" || 
-            (statusFilter === "applied" && job.status === "Applied") || 
-            (statusFilter === "not_applied" && job.status !== "Applied");
 
 
-        return matchesSearch &&  matchesRemoteFilter &&  matchPlatformFilter && matchesUsEligible && matchStatusFilter ;
-    })
-    .sort((a, b) => {
-        switch (sortBy) {
-        case 'date-desc':
-            return new Date(b.date || 0) - new Date(a.date || 0);
-        case 'date-asc':
-            return new Date(a.date || 0) - new Date(b.date || 0);
-        case 'company-asc':
-            return (a.company || '').localeCompare(b.company || '');
-        case 'company-desc':
-            return (b.company || '').localeCompare(a.company || '');
-        case 'platform-asc':
-            return (a.platform || '').localeCompare(b.platform || '');
-        case 'platform-desc':
-            return (b.platform || '').localeCompare(a.platform || '');
-        case 'status':
-            return (a.status || '').localeCompare(b.status || '');
-        default:
-            return 0;
-        }
-    });
-
-    // Extract unique platform options dynamically
-    const uniquePlatforms = [...new Set(jobs.map(job => job.platform).filter(Boolean))].sort();
-
-    // 📜 Job status data structure
-    const jobStatuses = [
-        { value: "all", label: "All" },
-        { value: "applied", label: "Applied" },
-        { value: "not_applied", label: "Not Applied" }
-    ];
 
 
   if (loading) return <div className="p-8" >🔄 Loading job listings...</div>;
@@ -367,7 +425,11 @@ const filteredAndSortedJobs = [...jobs]
 
 
   return (    
-    <div className="flex min-h-screen font-sans">
+    // <div className="flex min-h-screen font-sans w-full overflow-x-hidden m-0 p-0">
+    // <div className="fixed inset-0 w-screen h-screen flex font-sans overflow-hidden m-0 p-0">
+    // <div className="fixed inset-0 flex font-sans overflow-hidden overflow-x-hidden m-0 p-0">
+    <div className="fixed inset-0 flex font-sans overflow-hidden overflow-x-hidden m-0 p-0">
+        
 
       {/* 👈 Left Sidebar (1/3 Width) */}
        {/* <div className="w-[450px] shrink-0 flex-1 border-r border-gray-200 bg-gray-50 overflow-y-auto max-h-screen relative"> */}
@@ -420,8 +482,69 @@ const filteredAndSortedJobs = [...jobs]
 
     {/* 🎛️ Filter Controls Row */}
         <div className="flex gap-2">
+            {/* 🌐 Platform Checkbox Dropdown Container */}
+            <div className="relative flex-1">
+                {/* Dropdown Toggle Button */}
+                <button
+                    type="button"
+                    onClick={() => setIsPlatformDropdownOpen(!isPlatformDropdownOpen)}
+                    className="w-full p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs text-left truncate cursor-pointer flex justify-between items-center"
+                >
+                    <span>
+                        {platformFilter.length === 0 
+                            ? "No platforms selected" 
+                            : platformFilter.length === uniquePlatforms.length 
+                            ? "All Platforms" 
+                            : `Platforms (${platformFilter.length})`}
+                    </span>
+                    <span>▼</span>
+                </button>
+
+                {/* Dropdown Checkbox Panel */}
+                {isPlatformDropdownOpen && (
+                    <div className="absolute left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg z-20 p-2 max-h-48 overflow-y-auto text-xs">
+                        <div className="flex justify-between pb-1 mb-1 border-b border-gray-200 text-[10px]">
+                            <button 
+                                type="button"
+                                onClick={() => setPlatformFilter(uniquePlatforms)}
+                                className="text-blue-600 hover:underline cursor-pointer bg-transparent border-none"
+                            >
+                                Select All
+                            </button>
+                            <button 
+                                type="button"
+                                onClick={() => setPlatformFilter([])}
+                                className="text-red-600 hover:underline cursor-pointer bg-transparent border-none"
+                            >
+                                Clear All
+                            </button>
+                        </div>
+
+                        {uniquePlatforms.map((plat) => {
+                            const isChecked = platformFilter.includes(plat);
+                            return (
+                                <label key={plat} className="flex items-center gap-2 py-1 px-1 hover:bg-gray-50 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setPlatformFilter([...platformFilter, plat]);
+                                            } else {
+                                                setPlatformFilter(platformFilter.filter((p) => p !== plat));
+                                            }
+                                        }}
+                                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                    />
+                                    <span className="truncate text-gray-700">{plat}</span>
+                                </label>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
             {/* 🌐 Platform Dropdown Filter */}
-            <select 
+            {/* <select 
                 value={platformFilter}
                 onChange={(e) => setPlatformFilter(e.target.value)}
                 className="p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs w-36 min-w-0 truncate"
@@ -432,7 +555,7 @@ const filteredAndSortedJobs = [...jobs]
                     {plat}
                 </option>
                 ))}
-            </select>
+            </select> */}
 
             {/* 🌐 Status Dropdown Filter */}
             <select 
@@ -573,10 +696,13 @@ const filteredAndSortedJobs = [...jobs]
 
 
       {/* 👉 Main Content Area (2/3 Width) */}
-        <div className="flex flex-[2] flex-col p-8 overflow-y-auto max-h-screen">
+        {/* <div className="flex flex-1 flex-col p-8 overflow-y-auto max-h-screen min-w-0 right-0"> */}
+        {/* <div className="flex-1 flex flex-col p-8 overflow-y-auto h-full min-w-0"> */}
+        <div className="flex-1 flex flex-col p-8 overflow-y-auto h-full min-w-0 box-border">
 
         {/* 👉 Tools bar */}
-        <div className="flex justify-between items-center w-full mb-4 px-2 py-1 bg-gray-600  border border-gray-300 shadow-md">
+        {/* <div className="flex justify-between items-center w-full mb-4 px-2 py-1 bg-gray-600  border border-gray-300 shadow-md"> */}
+        <div className="flex justify-between items-center w-full box-border mb-4 px-2 py-1 bg-gray-600 border border-gray-300 shadow-md">
             <label className="text-white font-bold text-sm "l>Tools: </label>
 
             <button 
@@ -698,6 +824,20 @@ const filteredAndSortedJobs = [...jobs]
             className="hover:bg-blue-700 bg-blue-600 text-white rounded cursor-pointer font-bold px-3 py-1.5 border-none"
           >
             Undo
+          </button>
+        </div>
+      )}
+
+      {/* 🪟 Scan Status Banner (Same structure as deleted banner) */}
+      {scanMessage && (
+        <div className="items-center text-white text-sm bg-[#333] fixed flex gap-4 z-[1000] py-3 px-5 rounded-lg left-1/2 -translate-x-1/2 bottom-5 shadow-lg">
+          <span>{scanMessage}</span>
+          {/* Optional: Add a close button if it doesn't auto-dismiss */}
+          <button 
+            onClick={() => setScanMessage('')}
+            className="hover:bg-gray-600 bg-gray-700 text-white rounded cursor-pointer font-bold px-2 py-1 border-none text-xs"
+          >
+            ✕
           </button>
         </div>
       )}

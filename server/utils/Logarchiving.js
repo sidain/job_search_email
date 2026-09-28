@@ -1,27 +1,39 @@
 const fs = require('fs');
 const path = require('path');
 
-// Moves any email_scan_*.log files left over from previous runs into archives/logs/ so
-// logs/ only ever contains the current run's file. Mirrors the archive_old_logs()
-// convention already used for job_listings_*.log in job_search_email.py.
 function archiveOldEmailScanLogs(logsDir, rootDir) {
     if (!fs.existsSync(logsDir)) return;
 
-    const oldLogs = fs.readdirSync(logsDir)
-        .filter(f => f.startsWith('email_scan_') && f.endsWith('.log'));
+    const archiveBase = path.join(rootDir, 'archives', 'logs');
 
-    if (oldLogs.length === 0) return;
+    const files = fs.readdirSync(logsDir);
+    for (const file of files) {
+        const filePath = path.join(logsDir, file);
+        const stat = fs.statSync(filePath);
 
-    const archiveDir = path.join(rootDir, 'archives', 'logs');
-    if (!fs.existsSync(archiveDir)) {
-        fs.mkdirSync(archiveDir, { recursive: true });
-    }
+        if (stat.isFile()) {
+            let subfolder = 'other';
+            if (file.startsWith('email_scan')) {
+                subfolder = 'email_scan';
+            } else if (file.includes('errors')) {
+                subfolder = 'errors';
+            } else if (file.includes('summary')) {
+                subfolder = 'summary';
+            } else if (file.startsWith('job_listings')) {
+                subfolder = 'job_listings';
+            }
 
-    for (const file of oldLogs) {
-        try {
-            fs.renameSync(path.join(logsDir, file), path.join(archiveDir, file));
-        } catch (err) {
-            console.error(`Failed to archive log ${file}:`, err.message); // best-effort; a stuck file here shouldn't block a new run
+            const targetDir = path.join(archiveBase, subfolder);
+            if (!fs.existsSync(targetDir)) {
+                fs.mkdirSync(targetDir, { recursive: true });
+            }
+
+            const targetPath = path.join(targetDir, file);
+            try {
+                fs.renameSync(filePath, targetPath);
+            } catch (err) {
+                console.error(`Failed to archive log file ${file}:`, err);
+            }
         }
     }
 }

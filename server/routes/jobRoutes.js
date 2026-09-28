@@ -7,7 +7,15 @@ const fs = require('fs');
 
 const { archiveOldEmailScanLogs } = require('../utils/logArchiving');
 
-
+// Helper to generate formatted date-timestamp string: YYYY_MM_DD_SS
+function getFormattedTimestamp() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const second = String(now.getSeconds()).padStart(2, '0');
+    return `${year}_${month}_${day}_${second}`;
+}
 
 // GET all active jobs
 router.get('/', async (req, res) => {
@@ -19,15 +27,34 @@ router.get('/', async (req, res) => {
     }
 });
 
+let isScanning = false;
+let scanStartTime = null;
+let lastScanDuration = null;
+
+// GET scanner status
+router.get('/emailScan/status', async (req, res) => {
+    res.json({
+        isScanning: isScanning,
+        duration: lastScanDuration
+    });
+});
+
 // trigger python email scanner
 router.post('/emailScan', async (req, res) => {
-    try{
-        const { dryRun, noEnrich} = req.body;
+    try {
+        if (isScanning) {
+            return res.status(400).json({ message: 'Already scanning' });
+        }
 
-        const args = [ 'job_search_email.py'];
+        isScanning = true;
+        scanStartTime = Date.now();
+        lastScanDuration = null;
 
-        if( dryRun) args.push('--dry-run');
-        if( noEnrich) args.push('--no-enrich');
+        const { dryRun, noEnrich } = req.body;
+        const args = ['scripts/job_search_email.py'];
+
+        if (dryRun) args.push('--dry-run');
+        if (noEnrich) args.push('--no-enrich');
 
         const rootDir = path.join(__dirname, '../../');
         const logsDir = path.join(rootDir, 'logs');
@@ -36,13 +63,15 @@ router.post('/emailScan', async (req, res) => {
             fs.mkdirSync(logsDir, { recursive: true });
         }
 
+        // Move older log files to archives/logs/<subfolder> before generating new log
         archiveOldEmailScanLogs(logsDir, rootDir);
 
-        const logFilename = `email_scan_${Date.now()}.log`;
+        const timestampStr = getFormattedTimestamp();
+        const logFilename = `${timestampStr}_email_scan.log`;
         const logFilePath = path.join(logsDir, logFilename);
         const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
 
-        const pythonProcess = spawn( 'python3', args, {
+        const pythonProcess = spawn('python3', args, {
             cwd: rootDir,
         });
 
@@ -51,9 +80,7 @@ router.post('/emailScan', async (req, res) => {
 
         pythonProcess.on('error', (err) => {
             console.error('Failed to start Python subprocess. Is Python installed and in your PATH?', err);
-
             logStream.write(`ERROR: Failed to start Python process: ${err.message}\n`);
-
             logStream.end();
         });
 
@@ -62,14 +89,17 @@ router.post('/emailScan', async (req, res) => {
         pythonProcess.stderr.pipe(logStream);
 
         pythonProcess.stdout.on('data', data => { 
-            stdoutData += data.toString() 
+            stdoutData += data.toString(); 
         });
 
         pythonProcess.stderr.on('data', data => { 
-            stderrData += data.toString() 
+            stderrData += data.toString(); 
         });
 
         pythonProcess.on('close', (code) => {
+            isScanning = false;
+            lastScanDuration = Math.round((Date.now() - scanStartTime) / 1000);
+
             console.log(`Scanner finished with code ${code}. Log saved to ${logFilename}`);
             logStream.end();
         });
@@ -79,11 +109,11 @@ router.post('/emailScan', async (req, res) => {
             pid: pythonProcess.pid,
             logFile: logFilename
         });
+
     } catch (error) {
         console.error('Server error triggering scan:', error);
         return res.status(500).json({ message: 'Server error triggering scan', error: error.message });
     }
-
 });
 
 // PATCH update job
