@@ -20,8 +20,21 @@ function getFormattedTimestamp() {
 // GET all active jobs
 router.get('/', async (req, res) => {
     try {
-        const jobs = await Job.find({ deleted: { $ne: true } }).sort({ last_updated: -1 });
+        const currentDate= new Date();
+        const oneMonthAgo = new Date();
+        oneMonthAgo.setMonth(currentDate.getMonth() - 1);
+
+        const jobs = await Job.find({ 
+            deleted: { $ne: true },
+
+            last_updated: { 
+                $gte: oneMonthAgo.toISOString().split('T')[0],
+                $lte: currentDate.toISOString().split('T')[0]
+            },
+        }).sort({ last_updated: -1 });
+        
         res.json(jobs);
+        
     } catch (error) {
         res.status(500).json({ message: 'Error fetching jobs', error });
     }

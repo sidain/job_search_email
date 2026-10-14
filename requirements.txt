@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+selenium>=4.6.0
+pytest
+boto3

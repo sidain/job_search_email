@@ -11,7 +11,9 @@ COPY package*.json ./
 RUN npm install
 
 # Install required Python packages for your job search scripts
-RUN pip install --no-cache-dir ollama pymongo requests beautifulsoup4 google-api-python-client google-auth-oauthlib --break-system-packages
+# RUN pip install --no-cache-dir ollama pymongo requests beautifulsoup4 google-api-python-client google-auth-oauthlib --break-system-packages
+# Add selenium to your existing pip install line in server/Dockerfile.dev
+RUN pip install --no-cache-dir ollama pymongo requests beautifulsoup4 google-api-python-client google-auth-oauthlib selenium --break-system-packages
 
 # Copy the rest of the server code
 COPY . .

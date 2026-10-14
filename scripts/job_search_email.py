@@ -37,6 +37,15 @@ from googleapiclient.errors import HttpError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+
+
+
 
 # Get the absolute path of the directory where this script is located
 ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -147,6 +156,22 @@ PLATFORM_DOMAINS = {
     'greenhouse.io': 'Greenhouse',
     'jobs.google.com': 'Google Jobs',
 }
+
+GENERIC_COMPANY_KEYWORDS = [
+    'reputable company',
+    # 'confidential company',
+    # 'confidential',
+    # 'stealth startup',
+    # 'stealth mode',
+    # 'undisclosed',
+    # 'leading company',
+    # 'private company',
+]
+
+def is_generic_company(company: str) -> bool:
+    clean = (company or "").strip().lower()
+    return any(keyword in clean for keyword in GENERIC_COMPANY_KEYWORDS)
+
 
 STAFFING_AGENCY_KEYWORDS = [
     'robert half', 'insight global', 'teksystems', 'tek systems', 'kforce', 'randstad',
@@ -453,6 +478,7 @@ def save_jobs_to_mongo(jobs, collection, logger):
             "status": "Needs Review" if (not j.get('location') or not j.get('comp')) else "OK",
             "is_staffing_agency": j.get("staffing_agency", ""),
             "us_eligible": j.get("us_eligible", ""),
+            "deleted": j.get("deleted", False),
             "last_updated": datetime.utcnow(),
             }
 
@@ -958,6 +984,85 @@ def stage2_llm_fill(job, client, logger):
     return job
 
 
+
+
+
+CHROME_OPTIONS = [
+    "--headless",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--user-agent=" + DEFAULT_HEADERS["User-Agent"],
+]
+
+
+
+# def setup_selenium_driver():
+#     chromedriver_path = PROJECT_ROOT / "chromedriver" / "chromedriver-win64" / "chromedriver.exe"
+    
+#     service = Service(str(chromedriver_path))
+#     options = webdriver.ChromeOptions()
+#     for opt in CHROME_OPTIONS:
+#         options.add_argument(opt)
+    
+#     driver = webdriver.Chrome(service=service, options=options)
+#     return driver
+
+def setup_selenium_driver():
+    options = webdriver.ChromeOptions()
+    # Add any options you need (e.g., headless, disable-gpu)
+    for opt in CHROME_OPTIONS:
+        options.add_argument(opt)
+    
+    # Selenium Manager handles the driver automatically!
+    driver = webdriver.Chrome(options=options)
+    return driver
+
+
+def enrich_job(job, logger):
+    url = job.get('url')
+    if not url:
+        job['_page_text'] = None
+        job['notes'] = "No URL to enrich"
+        return job
+
+    try:
+        # Initialize Selenium driver (reuse across jobs for efficiency)
+        driver = setup_selenium_driver()
+        
+        logger.info(f"Loading page with Selenium: {url}")
+        driver.get(url)
+
+        # Wait for dynamic content to load
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+
+        # Optional: Scroll down to trigger lazy loading (if needed)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        
+        # Wait a bit more for any additional content
+        time.sleep(3)
+
+        # Extract cleaned text after removing unwanted elements
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+
+        job['_page_text'] = soup.get_text(separator=" ", strip=True)[:MAX_PAGE_TEXT_CHARS]
+        job['notes'] = ""
+
+    except Exception as e:
+        logger.warning(f"Selenium enrichment failed for {url}: {e}")
+        job['_page_text'] = None
+        job['notes'] = f"Fetch with Selenium failed: {e}"
+
+    finally:
+        driver.quit()  # Always close the browser
+
+    return job
+
+
 def enrich_all_jobs(jobs, logger, stats):
     session = create_resilient_session()
     client = ollama.Client(host=OLLAMA_HOST)
@@ -1350,10 +1455,12 @@ def main(dry_run=False, no_enrich=False, reprocess_recent=None, export_processed
         for j in all_jobs:
             status = "Needs Review" if (not j.get('location') or not j.get('comp')) else "OK"
             staffing = is_staffing_agency(j['company'])
+            generic_co = is_generic_company(j['company']) # 👈 Check for generic phrase
             us_eligible, eligibility_reason = classify_us_eligibility(j['location'], j['comp'])
 
             j['staffing_agency'] = "Yes" if staffing else "No"
             j['us_eligible'] = us_eligible
+            j['deleted'] = True if generic_co else False
 
             notes = j.get('notes', '')
 
@@ -1463,4 +1570,3 @@ if __name__ == '__main__':
             print(f"\nCRITICAL ERROR: {e}")
         import traceback
         traceback.print_exc()
-        
