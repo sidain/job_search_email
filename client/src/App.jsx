@@ -1,11 +1,63 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { List, useDynamicRowHeight } from 'react-window';
+// import React, { useState, useEffect } from 'react';
+// import { FixedSizeList as List } from 'react-window';
+// import { List } from 'react-window';
 import axios from 'axios';
 import ConfirmModal from './components/ConfirmModal';
 import TagInput from './components/TagInput';
+import JobCard from './components/JobCard';
+
+
+
+
+function Row({ index, style, rows, selectedJob, setSelectedJob, handleDeleteJob,
+               handlePatchJob, toggleCompanyCollapse, getMsgIdColor,
+               getDateGradationColor, getPlatformColor }) {
+    const row = rows[index];
+
+    if (row.type === 'header') {
+        return (
+            <div style={style} className="px-4 pt-4 pb-1">
+                <div
+                    onClick={() => toggleCompanyCollapse(row.companyName)}
+                    className="bg-gray-200 px-3 py-1.5 rounded text-xs font-bold text-gray-700 flex justify-between items-center cursor-pointer hover:bg-gray-300 transition-colors duration-200"
+                >
+                    <span>
+                        <span>{row.isCollapsed ? '▶' : '▼'}</span>
+                        {' '}🏢 {row.companyName}
+                    </span>
+                    <span className="bg-white text-gray-600 rounded-full px-2 py-0.5 text-[10px] shadow-sm">
+                        {row.count} {row.count === 1 ? 'job' : 'jobs'}
+                    </span>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div style={style} className={`px-4 py-1.5 ${row.grouped ? 'pl-6' : ''}`}>
+            <JobCard
+                job={row.job}
+                isSelected={selectedJob && selectedJob._id === row.job._id}
+                onSelect={setSelectedJob}
+                onDelete={handleDeleteJob}
+                onApply={(id) => handlePatchJob(id, { status: 'Applied' })}
+                getMsgIdColor={getMsgIdColor}
+                getDateGradationColor={getDateGradationColor}
+                getPlatformColor={getPlatformColor}
+            />
+        </div>
+    );
+}
+
+
+
 
 function App() {
     const platformDropdownRef = React.useRef(null);
     const locationDropdownRef = React.useRef(null);
+    const companyDropdownRef = React.useRef(null);
 
     const [jobs, setJobs] = useState([]);
     const [selectedJob, setSelectedJob] = useState(null); 
@@ -41,6 +93,7 @@ function App() {
     const [remoteFilter, setRemoteFilter] = useState(localStorage.getItem('remoteFilter') || 'all');
     const [usEligibleFilter, setUsEligibleFilter] = useState(localStorage.getItem('usEligibleFilter') || 'all');
 
+    const rowHeight = useDynamicRowHeight({ defaultRowHeight: 140 });
 
     // General keywords list
     const [generalKeywords, setGeneralKeywords] = useState(() => {
@@ -62,7 +115,25 @@ function App() {
     });
 
 
+    const uniqueCompanies = React.useMemo(() => {
+        return [...new Set(jobs.map(job => job.company).filter(Boolean))].sort();
+    }, [jobs]);
 
+    const [isCompanyDropdownOpen, setIsCompanyDropdownOpen] = useState(false);
+
+    const [companyFilter, setCompanyFilter] = useState(() => {
+        const saved = localStorage.getItem('companyFilter');
+
+        if (saved) {
+            try {
+                return JSON.parse(saved);
+            } catch (e) {
+                return [];
+            }
+        }
+
+        return uniqueCompanies;
+    });
 
 
     // Extract unique platform options dynamically
@@ -183,6 +254,9 @@ function App() {
 
         setKeywordMatchMode('any');
         localStorage.removeItem('keywordMatchMode');
+
+        setCompanyFilter(uniqueCompanies);
+        localStorage.removeItem('companyFilter');
     };
 
 
@@ -207,6 +281,10 @@ function App() {
                 const matchPlatformFilter = 
                     platformFilter.length === 0 || 
                     platformFilter.includes(job.platform);
+
+                    const matchCompanyFilter = 
+                    companyFilter.length === 0 || 
+                    companyFilter.includes(job.company);
                 
                 const matchStatusFilter =
                     statusFilter === "all" || 
@@ -234,7 +312,7 @@ function App() {
                         })
                 );
 
-                return matchesSearch && matchesLocationFilter && matchPlatformFilter && matchesUsEligible && matchStatusFilter && matchesRemoveKeywords && matchesGeneralKeywords;
+                return matchesSearch && matchesLocationFilter && matchPlatformFilter && matchesUsEligible && matchStatusFilter && matchesRemoveKeywords && matchCompanyFilter && matchesGeneralKeywords;
             })
             .sort((a, b) => {
                 switch (sortBy) {
@@ -262,6 +340,26 @@ function App() {
     const groupedJobs = groupByCompany 
     ? Object.groupBy(filteredAndSortedJobs, job => job.company || 'Unknown Company')
     : null;
+
+
+    const rows = useMemo(() => {
+        // flat view: every job is a row
+        if (!groupByCompany) {
+            return filteredAndSortedJobs.map(job => ({ type: 'job', job }));
+        }
+
+        // grouped view: header row, then that company's jobs (unless collapsed)
+        const out = [];
+        for (const [companyName, companyJobs] of Object.entries(groupedJobs)) {
+            const isCollapsed = collapsedCompanies[companyName] || false;
+            out.push({ type: 'header', companyName, count: companyJobs.length, isCollapsed });
+            if (!isCollapsed) {
+                companyJobs.forEach(job => out.push({ type: 'job', job }));
+            }
+        }
+
+        return out;
+    }, [groupByCompany, groupedJobs, filteredAndSortedJobs, collapsedCompanies]);
 
 
 
@@ -355,6 +453,9 @@ function App() {
                 try{
                     const statusRes = await axios.get('http://localhost:5000/api/jobs/emailScan/status');
 
+                    setScanMessage(  `Last log line: ${statusRes.data.lastLogLine || 'N/A'}` );    
+
+
                     if( !statusRes.data.isScanning ){
                         clearInterval( pollInterval );
 
@@ -362,7 +463,7 @@ function App() {
                         setIsScanning(false);
 
                         const durationMsg = statusRes.data.duration 
-                            ? `Email scan complete (${statusRes.data.duration}s)` 
+                            ? `Email scan complete (${statusRes.data.duration}s) \n Last log line: ${statusRes.data.lastLogLine || 'N/A'}` 
                             : 'Email scan complete!';
 
                         setScanMessage(durationMsg);
@@ -507,6 +608,10 @@ function App() {
                 setIsLocationDropdownOpen(false);
             }
 
+            if (companyDropdownRef.current && !companyDropdownRef.current.contains(event.target)) {
+                setIsCompanyDropdownOpen(false);
+            }
+
         };
 
         document.addEventListener('mousedown', handleClickOutside);
@@ -605,28 +710,58 @@ function App() {
 
        {/* 📌 Sticky Header Container */}
         <div className="flex flex-col gap-2 top-0 p-4 sticky bg-white z-10 shadow-md border-b border-gray-200">
-        
-        
-        <h2 
-            style={{ color: '#111827' }}
-            className="text-[#111] font-bold text-[14px] m-0 mb-2">
-            💼 Job Listings ({filteredAndSortedJobs.length}/{jobs.length})
-        </h2>
+            {/* 👉 Tools bar */}
+            {/* <div className="flex justify-between items-center w-full mb-4 px-2 py-1 bg-gray-600  border border-gray-300 shadow-md"> */}
+            <div className="flex justify-between items-center w-full box-border mb-2 px-2 py-1 bg-gray-600 border border-gray-300 shadow-md">
+                {/* <label className="text-white font-bold text-sm "l>Tools: </label> */}
 
-        <div>
-            {/* 🎛️ Grouping Toggle Option */}
-            <div className="flex items-center gap-2 mt-2">
-            <label className="text-xs text-gray-700 flex items-center gap-1.5 cursor-pointer">
-                <input 
-                type="checkbox" 
-                checked={groupByCompany} 
-                onChange={(e) => setGroupByCompany(e.target.checked)}
-                className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
-                />
-                <span>Group by Company</span>
-            </label>
+                <button 
+                    onClick={ (e)=> { e.stopPropagation(); handleRunEmailScan(); }} 
+                    className="border rounded cursor-pointer border-gray-300 text-[10px] px-1 py-[0.25px] bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700"
+                >
+                    Scan Emails
+                </button>
+
+                
+                <button 
+                    onClick = { (e)=> { e.stopPropagation(); handleRunEmailScan(); }}
+                    className="border rounded cursor-pointer border-gray-300 text-[10px] px-1 py-[0.25px] p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700">
+
+                    Scan Applied
+                </button>
+
+                <button 
+                    onClick = { (e)=> { e.stopPropagation(); handleRunJobListingScan(); }}
+                    className="border rounded cursor-pointer border-gray-300 text-[10px] px-1 py-[0.25px] p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700"
+                >
+                    Scan Job Listings
+                </button>
+
+
             </div>
-        </div>
+
+        
+        
+            <h2 
+                style={{ color: '#111827' }}
+                className="text-[#111] font-bold text-[14px] m-0 mb-2">
+                💼 Job Listings ({filteredAndSortedJobs.length}/{jobs.length})
+            </h2>
+
+            <div>
+                {/* 🎛️ Grouping Toggle Option */}
+                <div className="flex items-center gap-2 mt-2">
+                <label className="text-xs text-gray-700 flex items-center gap-1.5 cursor-pointer">
+                    <input 
+                    type="checkbox" 
+                    checked={groupByCompany} 
+                    onChange={(e) => setGroupByCompany(e.target.checked)}
+                    className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+                    />
+                    <span>Group by Company</span>
+                </label>
+                </div>
+            </div>
 
         {/* 🔍 Search Input */}
         <input 
@@ -716,14 +851,17 @@ function App() {
                         <label className="flex items-center gap-2 py-1 px-1 hover:bg-gray-50 cursor-pointer">
                             <input
                                 type="checkbox"
-                                checked={uniqueLocations.filter(loc => loc.toLowerCase().includes('remote')).every(l => locationFilter.includes(l))}
+                                checked={(() => {
+                                    const remoteLocs = uniqueLocations.filter(loc => loc.toLowerCase().includes('remote'));
+                                    return remoteLocs.length > 0 && remoteLocs.every(l => locationFilter.includes(l));
+                                })()}
                                 onChange={(e) => {
                                     const remoteLocs = uniqueLocations.filter(loc => loc.toLowerCase().includes('remote'));
                                     if (e.target.checked) {
-                                        // Add all remote locations without duplicates
-                                        setLocationFilter([...new Set([...locationFilter, ...remoteLocs])]);
+                                        // Clear everything else and select ONLY remote locations
+                                        setLocationFilter(remoteLocs);
                                     } else {
-                                        // Remove all remote locations
+                                        // Remove remote locations when unchecked
                                         setLocationFilter(locationFilter.filter(l => !l.toLowerCase().includes('remote')));
                                     }
                                 }}
@@ -879,6 +1017,73 @@ function App() {
         </div>
 
 
+        {/* Company Filter */}
+        <div className="flex gap-2">
+            {/* 🌐 Company Checkbox Dropdown Container */}
+            <div className="relative flex-1" ref={companyDropdownRef}>
+                {/* Dropdown Toggle Button */}
+                <button
+                    type="button"
+                    onClick={() => setIsCompanyDropdownOpen(!isCompanyDropdownOpen)}
+                    className="w-full p-1 border border-gray-300 rounded bg-white text-gray-800 text-xs text-left truncate cursor-pointer flex justify-between items-center"
+                >
+                    <span>
+                        {companyFilter.length === 0 
+                            ? "No companies selected" 
+                            : companyFilter.length === uniqueCompanies.length 
+                            ? "All Companies" 
+                            : `Companies (${companyFilter.length})`}
+                    </span>
+                    <span>▼</span>
+                </button>
+
+                {/* Dropdown Checkbox Panel */}
+                {isCompanyDropdownOpen && (
+                    <div className="absolute left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg z-20 p-2 max-h-48 overflow-y-auto text-xs">
+                        <div className="flex justify-between pb-1 mb-1 border-b border-gray-200 text-[10px]">
+                            <button 
+                                type="button"
+                                onClick={() => setCompanyFilter(uniqueCompanies)}
+                                className="text-blue-600 hover:underline cursor-pointer bg-transparent border-none"
+                            >
+                                Select All
+                            </button>
+                            <button 
+                                type="button"
+                                onClick={() => setCompanyFilter([])}
+                                className="text-red-600 hover:underline cursor-pointer bg-transparent border-none"
+                            >
+                                Clear All
+                            </button>
+                        </div>
+
+                        {uniqueCompanies.map((comp) => {
+                            const isChecked = companyFilter.includes(comp);
+                            return (
+                                <label key={comp} className="flex items-center gap-2 py-1 px-1 hover:bg-gray-50 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setCompanyFilter([...companyFilter, comp]);
+                                            } else {
+                                                setCompanyFilter(companyFilter.filter((c) => c !== comp));
+                                            }
+                                        }}
+                                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                    />
+                                    <span className="truncate text-gray-700">{comp}</span>
+                                </label>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+
+        </div>
+
+
         {/* keyword filtering section in sidebar */}
         <div className="flex flex-col gap-1 my-1">
 
@@ -962,258 +1167,16 @@ function App() {
     <div className="w-[350px] shrink-0 border-r border-gray-200 bg-gray-50 overflow-y-auto max-h-screen relative flex flex-col">
 
     {/* // listings container */}
-    <div className="flex flex-col gap-4 p-4">
-        {groupByCompany ? (
-            // 🏢 RENDER GROUPED VIEW BY COMPANY
-            Object.entries(groupedJobs).map(([companyName, companyJobs]) => 
-            {
-                const isCollapsed = collapsedCompanies[companyName] || false;
-
-                return ( 
-                    <div 
-                        key={companyName} 
-                        onClick={() => toggleCompanyCollapse(companyName)}
-                        className="space-y-3"
-                    >
-                        {/* Company Section Header */}
-                        <div className="bg-gray-200 px-3 py-1.5 rounded text-xs font-bold text-gray-700 flex justify-between items-center sticky top-0 z-5">
-                            <span>
-                                <span>{isCollapsed ? '▶' : '▼'}</span>
-                                🏢 {companyName}
-                            </span>
-
-                            <span className="bg-white text-gray-600 rounded-full px-2 py-0.5 text-[10px] shadow-sm">
-                                {companyJobs.length} {companyJobs.length === 1 ? 'job' : 'jobs'}
-                            </span>
-                        </div>
-
-                        {/* Jobs belonging to this company */}
-                        {!isCollapsed && (
-                            <div className="flex flex-col gap-3 pl-2">
-                            {companyJobs.map((job) => {
-                                const isSelected = selectedJob && selectedJob._id === job._id;
-
-                                return (
-                                <div 
-                                    key={job._id} 
-                                    onClick={() => setSelectedJob(job)}
-                                    className={`rounded-lg p-4 cursor-pointer transition-colors duration-200 text-xs text-left shadow-sm ${ isSelected ? 'border-2 border-blue-600 bg-blue-50' : 'border border-gray-200 bg-white hover:border-gray-300'}`}
-                                >
-                                    {/* Job Card Content Structure */}
-                                    <div className="flex items-start justify-between gap-2 mb-2">
-                                        <div className="flex flex-col gap-1 text-[8px] text-gray-400 leading-tight">
-                                            <span className="text-[8px]">JobID: {job._id}</span>
-                                            <span
-                                                className="text-[8px] px-1.5 py-0.5 rounded inline-block w-fit"
-                                                style={{ backgroundColor: getMsgIdColor(job.message_id) }}
-                                            >
-                                                MsgId: {job.message_id || 'N/A'}
-                                            </span>
-                                        </div>
-
-                                        <div className="flex flex-col items-end gap-2 shrink-0">
-                                            <button 
-                                                onClick={(e) => { e.stopPropagation(); handleDeleteJob(job._id); }}
-                                                className="rounded text-xs bg-transparent cursor-pointer border-none text-gray-400 hover:text-red-600"
-                                            >
-                                                ❌
-                                            </button>
-
-                                            {job.status === 'Applied' ? (
-                                                <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                                                    Applied ✓
-                                                </span>
-                                            ) : (
-                                                <button 
-                                                    onClick={(e) => { e.stopPropagation(); handlePatchJob(job._id, { status: 'Applied' }); }}
-                                                    className="rounded text-xs bg-blue-600 text-white border border-emerald-200 px-2 py-0.5 hover:bg-emerald-700 cursor-pointer"
-                                                >
-                                                    Apply
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    <div className="text-center mb-2">
-                                        <h3 className="text-base font-semibold text-gray-900 mb-0.5 leading-snug">
-                                            {job.title || 'Untitled Role'}
-                                        </h3>
-                                        
-                                        <div 
-                                            style={{ 
-                                                backgroundColor: getDateGradationColor(job.date || job.last_updated), 
-                                                color: '#fff', 
-                                                padding: '2px 6px', 
-                                                borderRadius: '4px',
-                                                display: 'inline-block'
-                                            }}
-                                            className="text-[10px] font-semibold"
-                                        >
-                                            {job.last_updated ? `Last Updated: ${new Date(job.last_updated).toLocaleDateString()}` : 'Last Updated: N/A'}
-                                        </div>
-                                    </div>
-
-                                    <div className="text-gray-600 space-y-1.5">
-                                        <div>
-                                            <strong>Company:</strong> {job.company || 'N/A'}
-                                        </div>
-
-                                        <div>
-                                            <strong>Platform:</strong>{' '}
-                                            <span 
-                                                style={{ backgroundColor: getPlatformColor(job.platform), color:'white' }}
-                                                className="font-bold border rounded p-1 m-1"
-                                            >
-                                            {job.platform || 'N/A'}
-                                            </span>
-                                        </div>
-
-
-                                        <div className="flex justify-between gap-2">
-                                            <span><strong>Loc:</strong> {job.location || 'N/A'}</span>
-
-                                            <span><strong>Emp Type:</strong> {job.is_staffing_agency ? 'Staffing Agency' : 'Direct Hire'}</span>
-                                        </div>
-
-
-                                        <div className="flex justify-between gap-2">
-                                            <span><strong>US Eligible:</strong> {job.us_eligible ? 'Yes' : 'No'}</span>
-                                            
-                                            <span><strong>Comp:</strong> {job.comp || 'N/A'}</span>
-                                        </div>
-
-                                        <div className="text-center pt-1.5 mt-1 border-t border-gray-100">
-                                            <strong>Status:</strong> {job.status || 'N/A'}
-                                        </div>
-
-
-
-                                        <div className="flex justify-center items-center gap-3 mt-4 mb-6">
-                                            {/* 📧 View Source Email in Gmail */}
-                                            {job.gmail_link && (
-                                                <a 
-                                                    href={job.gmail_link} 
-                                                    target="_blank" 
-                                                    rel="noopener noreferrer" 
-                                                    style={{ backgroundColor: '#ea4335', color: '#fff' }}
-                                                    className="inline-block box-border text-center py-1.5 px-3 rounded no-underline font-bold text-[13px] w-20"
-                                                >
-                                                    Gmail
-                                                </a>
-                                            )}
-
-                                            {/* Embedded URL Section */}
-                                            {job.url && (
-                                                <a 
-                                                    href={job.url} 
-                                                    target="_blank" 
-                                                    rel="noopener noreferrer" 
-                                                    style={{ backgroundColor: '#0066cc', color: '#fff' }}
-                                                    className="inline-block box-border text-center py-1.5 px-3 rounded no-underline font-bold text-[13px] w-20"
-                                                >
-                                                    New tab
-                                                </a>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                                );
-                            })}
-                            </div>
-                        )}
-                    </div>
-                )
-            })
-        ) : (
-            // 📋 RENDER STANDARD FLAT LIST VIEW
-            filteredAndSortedJobs.map((job) => {
-            const isSelected = selectedJob && selectedJob._id === job._id;
-            
-            return (
-                <div 
-                key={job._id} 
-                onClick={() => setSelectedJob(job)}
-                className={`rounded-lg p-4 cursor-pointer transition-colors duration-200 text-xs text-left shadow-sm ${ isSelected ? 'border-2 border-blue-600 bg-blue-50' : 'border border-gray-200 bg-white hover:border-gray-300'}`}
-                >
-                {/* Same Job Card Content Structure */}
-                <div className="flex items-start justify-between gap-2 mb-2">
-                    <div className="flex flex-col gap-1 text-[8px] text-gray-400 leading-tight">
-                        <span className="text-[8px]">JobID: {job._id}</span>
-                        <span
-                            className="text-[8px] px-1.5 py-0.5 rounded inline-block w-fit"
-                            style={{ backgroundColor: getMsgIdColor(job.message_id) }}
-                        >
-                            MsgId: {job.message_id || 'N/A'}
-                        </span>
-                    </div>
-
-                    <div className="flex flex-col items-end gap-2 shrink-0">
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); handleDeleteJob(job._id); }}
-                            className="rounded text-xs bg-transparent cursor-pointer border-none text-gray-400 hover:text-red-600"
-                        >
-                            ❌
-                        </button>
-
-                        {job.status === 'Applied' ? (
-                            <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                                Applied ✓
-                            </span>
-                        ) : (
-                            <button 
-                                onClick={(e) => { e.stopPropagation(); handlePatchJob(job._id, { status: 'Applied' }); }}
-                                className="rounded text-xs bg-blue-600 text-white border border-emerald-200 px-2 py-0.5 hover:bg-emerald-700 cursor-pointer"
-                            >
-                                Apply
-                            </button>
-                        )}
-                    </div>
-                </div>
-
-                <div className="text-center mb-2">
-                    <h3 className="text-base font-semibold text-gray-900 mb-0.5 leading-snug">{job.title || 'Untitled Role'}</h3>
-                    <div 
-                        style={{ 
-                            backgroundColor: getDateGradationColor(job.date || job.last_updated), 
-                            color: '#fff', 
-                            padding: '2px 6px', 
-                            borderRadius: '4px',
-                            display: 'inline-block'
-                        }}
-                        className="text-[10px] font-semibold"
-                    >
-                        {job.last_updated ? `Last Updated: ${new Date(job.last_updated).toLocaleDateString()}` : 'Last Updated: N/A'}
-                    </div>
-                </div>
-
-                <div className="text-gray-600 space-y-1.5">
-                    <div><strong>Company:</strong> {job.company || 'N/A'}</div>
-                    <div>
-                        <strong>Platform:</strong>{' '}
-                        <span 
-                            style={{ backgroundColor: getPlatformColor(job.platform), color:'white' }}
-                            className="font-bold border rounded p-1 m-1"
-                        >
-                        {job.platform || 'N/A'}
-                        </span>
-                    </div>
-                    <div className="flex justify-between gap-2">
-                        <span><strong>Loc:</strong> {job.location || 'N/A'}</span>
-                        <span><strong>Emp Type:</strong> {job.is_staffing_agency ? 'Staffing Agency' : 'Direct Hire'}</span>
-                    </div>
-                    <div className="flex justify-between gap-2">
-                        <span><strong>US Eligible:</strong> {job.us_eligible ? 'Yes' : 'No'}</span>
-                        <span><strong>Comp:</strong> {job.comp || 'N/A'}</span>
-                    </div>
-                    <div className="text-center pt-1.5 mt-1 border-t border-gray-100">
-                        <strong>Status:</strong> {job.status || 'N/A'}
-                    </div>
-                </div>
-                </div>
-            );
-            })
-        )}
-        </div>
+    <div className="w-[350px] shrink-0 border-r border-gray-200 bg-gray-50 h-screen flex flex-col">
+        <List
+            rowComponent={Row}
+            rowCount={rows.length}
+            rowHeight={rowHeight}
+            rowProps={{ rows, selectedJob, setSelectedJob, handleDeleteJob, handlePatchJob,
+                        toggleCompanyCollapse, getMsgIdColor, getDateGradationColor, getPlatformColor }}
+            style={{ height: '100%' }}
+        />
+    </div>
 
     </div>
 
@@ -1227,26 +1190,6 @@ function App() {
         {/* <div className="flex-1 flex flex-col p-8 overflow-y-auto h-full min-w-0"> */}
         <div className="flex-1 flex flex-col p-8 overflow-y-auto h-full min-w-0 box-border">
 
-        {/* 👉 Tools bar */}
-        {/* <div className="flex justify-between items-center w-full mb-4 px-2 py-1 bg-gray-600  border border-gray-300 shadow-md"> */}
-        <div className="flex justify-between items-center w-full box-border mb-4 px-2 py-1 bg-gray-600 border border-gray-300 shadow-md">
-            <label className="text-white font-bold text-sm "l>Tools: </label>
-
-            <button 
-                onClick={ (e)=> { e.stopPropagation(); handleRunEmailScan(); }} 
-                className="border rounded cursor-pointer border-gray-300 text-xs p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700"
-            >
-                Scan Emails
-            </button>
-            
-            <button className="border rounded cursor-pointer border-gray-300 text-xs p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700">
-                Scan Job Listings
-            </button>
-            
-            <button className="border rounded cursor-pointer border-gray-300 text-xs p-1 bg-gray-400 text-black ml-2 mr-2 hover:bg-gray-700">
-                Z
-            </button>
-        </div>
 
 
         {selectedJob ? (
@@ -1306,9 +1249,25 @@ function App() {
 
                 {/* Embedded URL Section */}
                 {selectedJob.url && (
+                // <div>
+                //     <a 
+                //         href={selectedJob.url} 
+                //         target="_blank" 
+                //         rel="noopener noreferrer" 
+                //         style={{ backgroundColor: '#0066cc', color: '#fff' }}
+                //         className="inline-block box-border text-center py-1.5 px-3 rounded no-underline font-bold text-[13px] w-40 mb-2"
+                //     >
+                //         Open in new tab ↗
+                //     </a>
+                // </div>
+
                 <div>
                     <a 
-                        href={selectedJob.url} 
+                        href={
+                            (selectedJob.platform?.toLowerCase() || '').includes('ziprecruiter')
+                                ? selectedJob.url.split('?')[0] // Strips query parameters/tracking tokens off ZipRecruiter URLs
+                                : selectedJob.url
+                        } 
                         target="_blank" 
                         rel="noopener noreferrer" 
                         style={{ backgroundColor: '#0066cc', color: '#fff' }}
@@ -1316,16 +1275,29 @@ function App() {
                     >
                         Open in new tab ↗
                     </a>
+
+
+                        { (selectedJob.platform?.toLowerCase() || '').includes('ziprecruiter') && (
+                            <div className="text-[12px] mt-1 w-100">
+                                <span>{selectedJob.url || ''}</span>
+                                <br />
+                                <br />
+
+                                <span>{selectedJob.url.split('?')[1] || ''}</span>
+                            </div>
+                        )}
                 </div>
+
                 )}
             </div>
 
             <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                 {/* Job Details Section */}
-                { !(selectedJob.platform?.toLowerCase() || '').includes('linkedin') ? (
-                    <iframe src={`${selectedJob.url}`} className="w-full h-screen block">
-                    </iframe>
-                ) : null }
+                { !['linkedin', 'monster', 'ziprecruiter'].some(p => (selectedJob.platform?.toLowerCase() || '').includes(p)) ? (
+                        <iframe src={`${selectedJob.url}`} className="w-full h-screen block">
+                        </iframe>
+                    ) : null 
+                }
             </div>
 
           </div>

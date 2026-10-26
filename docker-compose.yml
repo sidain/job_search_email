@@ -9,13 +9,15 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile.dev
-    container_name: dev-backend
+    container_name: jobs-backend
     restart: always
     ports:
       - "5000:5000"
     working_dir: /app/server
     environment:
-      - MONGO_URI=mongodb://job-mongo:27017/your-database-name
+      - MONGO_URI=mongodb://jobs-mongo:27017
+      - MONGO_DB_NAME=job_listings_scanner
+      # - MONGO_URI=mongodb://jobs-mongo:27017/job_listings_scanner
       - PORT=5000
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
     extra_hosts:                                           # 👈 Add this block
@@ -32,7 +34,7 @@ services:
     build:
       context: ./client
       dockerfile: Dockerfile.dev
-    container_name: dev-client
+    container_name: jobs-client
     restart: always
     ports:
       - "5173:5173"

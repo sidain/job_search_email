@@ -1,7 +1,7 @@
 services:
   job-mongo:
     image: mongo:7
-    container_name: job-mongo
+    container_name: jobs-mongo
     restart: unless-stopped
     ports:
       - "27017:27017"

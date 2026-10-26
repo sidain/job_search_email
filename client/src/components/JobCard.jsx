@@ -52,7 +52,7 @@ const JobCard = React.memo(({
                 </div>
             </div>
 
-            {/* Title and Date Badge */}
+            {/* Title and Date Gradation Badge */}
             <div className="text-center mb-2">
                 <h3 className="text-base font-semibold text-gray-900 mb-0.5 leading-snug">
                     {job.title || 'Untitled Role'}
@@ -100,6 +100,35 @@ const JobCard = React.memo(({
 
                 <div className="text-center pt-1.5 mt-1 border-t border-gray-100">
                     <strong>Status:</strong> {job.status || 'N/A'}
+                </div>
+
+                {/* Quick Link Buttons (Gmail & New Tab) */}
+                <div className="flex justify-center items-center gap-3 mt-4 mb-2">
+                    {job.gmail_link && (
+                        <a 
+                            href={job.gmail_link} 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            style={{ backgroundColor: '#ea4335', color: '#fff' }}
+                            className="inline-block box-border text-center py-1.5 px-3 rounded no-underline font-bold text-[13px] w-20"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            Gmail
+                        </a>
+                    )}
+
+                    {job.url && (
+                        <a 
+                            href={job.url} 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            style={{ backgroundColor: '#0066cc', color: '#fff' }}
+                            className="inline-block box-border text-center py-1.5 px-3 rounded no-underline font-bold text-[13px] w-20"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            New tab
+                        </a>
+                    )}
                 </div>
             </div>
         </div>

@@ -7,6 +7,13 @@ const fs = require('fs');
 
 const { archiveOldEmailScanLogs } = require('../utils/logArchiving');
 
+
+let isScanning = false;
+let scanStartTime = null;
+let lastScanDuration = null;
+let currentLogFile = null; // Track the latest log file path
+
+
 // Helper to generate formatted date-timestamp string: YYYY_MM_DD_SS
 function getFormattedTimestamp() {
     const now = new Date();
@@ -28,29 +35,41 @@ router.get('/', async (req, res) => {
             deleted: { $ne: true },
 
             last_updated: { 
-                $gte: oneMonthAgo.toISOString().split('T')[0],
-                $lte: currentDate.toISOString().split('T')[0]
+                $gte: oneMonthAgo,
+                $lte: currentDate
             },
         }).sort({ last_updated: -1 });
         
         res.json(jobs);
         
     } catch (error) {
-        res.status(500).json({ message: 'Error fetching jobs', error });
     }
 });
 
-let isScanning = false;
-let scanStartTime = null;
-let lastScanDuration = null;
 
 // GET scanner status
 router.get('/emailScan/status', async (req, res) => {
+    let lastLine = null;
+
+    if (currentLogFile && fs.existsSync(currentLogFile)) {
+        try {
+            const fileContent = fs.readFileSync(currentLogFile, 'utf8');
+            const lines = fileContent.split(/\r?\n/).filter(line => line.trim() !== '');
+            if (lines.length > 0) {
+                lastLine = lines[lines.length - 1];
+            }
+        } catch (err) {
+            console.error('Error reading log file for status:', err);
+        }
+    }
+
     res.json({
         isScanning: isScanning,
-        duration: lastScanDuration
+        duration: lastScanDuration,
+        lastLogLine: lastLine
     });
 });
+
 
 // trigger python email scanner
 router.post('/emailScan', async (req, res) => {
@@ -83,6 +102,8 @@ router.post('/emailScan', async (req, res) => {
         const logFilename = `${timestampStr}_email_scan.log`;
         const logFilePath = path.join(logsDir, logFilename);
         const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
+
+        currentLogFile = logFilePath; // Store it so status can read it
 
         const pythonProcess = spawn('python3', args, {
             cwd: rootDir,
